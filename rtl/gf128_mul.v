@@ -1,3 +1,5 @@
+`default_nettype none
+
 // -----------------------------------------------------------------------------
 // GF(2^128) carry-less multiplier (iterative, MSB-first processing)
 // -----------------------------------------------------------------------------
@@ -98,3 +100,5 @@ module gf128_mul (
     end
 
 endmodule
+
+`default_nettype wire

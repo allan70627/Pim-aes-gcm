@@ -1,3 +1,5 @@
+`default_nettype none
+
 // -----------------------------------------------------------------------------
 // Builds the 128-bit length block (len(AAD)||len(CT)) for GHASH per SP 800-38D.
 // -----------------------------------------------------------------------------
@@ -10,3 +12,5 @@ module gcm_lenblock (
     assign len_block = {len_aad_bits, len_ct_bits};
 
 endmodule
+
+`default_nettype wire

@@ -1,3 +1,5 @@
+`default_nettype none
+
 // -----------------------------------------------------------------------------
 // AES-GCM controller: orchestrates phases and tag handling around datapath.
 // -----------------------------------------------------------------------------
@@ -287,5 +289,7 @@ module aes_gcm_ctrl (
     end
 
 endmodule
+
+`default_nettype wire
 
 
