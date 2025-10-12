@@ -77,6 +77,7 @@ module aes_gcm_datapath (
     reg [2:0]   phase_reg, phase_next;
 
     reg [127:0] H_reg;
+    reg         h_ready_reg;
     reg [127:0] pld_buf_data_reg;
     reg         pld_buf_valid_reg;
     reg         pld_buf_last_reg;
@@ -137,8 +138,8 @@ module aes_gcm_datapath (
     wire         aad_last_handshake     = aad_handshake && aad_last;
     wire         payload_din_handshake  = payload_channel_active && din_valid && din_ready;
     wire         payload_dout_handshake = payload_channel_active && ctr_dout_valid && dout_ready;
-    wire         load_pld_buf_dec       = !enc_mode_reg && payload_din_handshake && !pld_buf_valid_reg &&\n                       h_ready_reg;
-    wire         load_pld_buf_enc       =  enc_mode_reg && payload_dout_handshake && !pld_buf_valid_reg &&\n                       h_ready_reg;
+    wire         load_pld_buf_dec       = !enc_mode_reg && payload_din_handshake  && !pld_buf_valid_reg && h_ready_reg;
+    wire         load_pld_buf_enc       =  enc_mode_reg && payload_dout_handshake && !pld_buf_valid_reg && h_ready_reg;
     wire         load_pld_buf           = load_pld_buf_dec | load_pld_buf_enc;
     wire [127:0] pld_buf_data_load      = load_pld_buf_dec ? payload_data_masked_in : payload_data_masked_out;
     wire         pld_buf_last_load      = load_pld_buf_dec ? din_last : ctr_dout_last;
@@ -425,7 +426,8 @@ module aes_gcm_datapath (
                        dout_ready &&
                        !payload_pending_reg &&
                        !ctr_dout_valid &&
-                       !pld_buf_valid_reg &&\n                       h_ready_reg;
+                       !pld_buf_valid_reg &&                       
+                       h_ready_reg;
     assign dout_valid = ctr_dout_valid;
     assign dout_data  = ctr_dout_data;
     assign dout_keep  = ctr_dout_keep;

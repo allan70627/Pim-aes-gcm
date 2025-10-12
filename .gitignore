@@ -3,6 +3,7 @@ out/
 build/
 reports/
 netlist/
+tb/
 *.log
 *.saif
 *.vcd
