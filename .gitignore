@@ -9,6 +9,8 @@ tb/
 *.vcd
 *.vpd
 *.mr
+*.out
+*.cmd
 command.log
 .daidir/
 csrc/
@@ -17,3 +19,4 @@ ucli.key
 __pycache__/
 *.pyc
 .DS_Store
+*.out
