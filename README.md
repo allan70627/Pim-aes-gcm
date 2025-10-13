@@ -1,3 +1,4 @@
+Pim-AES-GCM
 What this project is
 
 A synthesizable AES-GCM engine in Verilog. It performs authenticated encryption (AEAD) following NIST SP 800-38D: plaintext is encrypted using AES in CTR mode while a GHASH authenticator (over GF(2¹²⁸)) accumulates AAD and ciphertext to produce a 128-bit tag.
