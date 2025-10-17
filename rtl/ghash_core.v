@@ -45,6 +45,8 @@ module ghash_core (
     // ------------------------------------------------------------------
     // Sequential state updates
     // ------------------------------------------------------------------
+    // update on init, any input beat, while mul is active, or for one cycle to deassert Y_valid
+    wire ghash_en = init | din_valid | mul_start | mul_done | Y_valid_reg;
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state_reg     <= ST_IDLE;

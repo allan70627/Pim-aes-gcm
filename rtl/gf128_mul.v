@@ -39,6 +39,8 @@ module gf128_mul (
     // ------------------------------------------------------------------
     // Sequential state updates
     // ------------------------------------------------------------------
+    wire mul_en = start | busy_reg | done_reg;  // update on start, while busy, and one cycle to clear done
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             busy_reg     <= 1'b0;
@@ -48,7 +50,7 @@ module gf128_mul (
             a_shift_reg  <= 256'h0;
             b_shift_reg  <= 128'h0;
             p_reg        <= 256'h0;
-        end else begin
+        end else if (mul_en) begin
             busy_reg     <= busy_next;
             done_reg     <= done_next;
             bit_cnt_reg  <= bit_cnt_next;

@@ -75,6 +75,9 @@ module aes_gcm_datapath (
     reg [63:0]  len_aad_bits_reg;
     reg [63:0]  len_pld_bits_reg;
     reg [2:0]   phase_reg, phase_next;
+    // Treat AAD / PAYLOAD / LEN / WAIT as the active processing window
+    wire dp_active = (phase_reg != PH_IDLE) && (phase_reg != PH_DONE);
+
 
     reg [127:0] H_reg;
     reg         h_ready_reg;
@@ -170,6 +173,7 @@ module aes_gcm_datapath (
     // ------------------------------------------------------------------
     // Sequential logic
     // ------------------------------------------------------------------
+    
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             start_d <= 1'b0;
@@ -508,6 +512,10 @@ module aes_gcm_datapath (
     // ------------------------------------------------------------------
     // AES task scheduler: priority CTR > TAGMASK > H; INIT asap on key change
     // ------------------------------------------------------------------
+    wire aes_task_en = dp_active | aes_init_reg | aes_next_reg | aes_result_valid
+                    | ctr_pending_reg | tagmask_pending_reg | h_pending_reg;
+
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             aes_init_reg          <= 1'b0;
@@ -522,7 +530,7 @@ module aes_gcm_datapath (
             ctr_consuming         <= 1'b0;
             tagmask_consuming     <= 1'b0;
             h_consuming           <= 1'b0;
-        end else begin
+        end else if (aes_task_en) begin
             aes_init_reg      <= 1'b0; // default pulse
             aes_next_reg      <= 1'b0; // default pulse
             ctr_next_reg      <= 1'b0;

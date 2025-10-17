@@ -42,8 +42,10 @@ module ctr_xor (
     reg         payload_last_reg;
     reg         payload_enc_reg;
 
-    wire accept_payload = din_valid && dout_ready && !payload_valid_reg && !dout_valid_reg;
-    wire clear_payload  = (state_reg == ST_HAVE_KS) && ks_valid && (!dout_valid_reg || (dout_valid_reg && dout_ready));
+    // wire accept_payload = din_valid && dout_ready && !payload_valid_reg && !dout_valid_reg;
+    wire accept_payload = din_valid && dout_ready && !payload_valid_reg && !dout_valid;
+    // wire clear_payload  = (state_reg == ST_HAVE_KS) && ks_valid && (!dout_valid_reg || (dout_valid_reg && dout_ready));
+    wire clear_payload  = (state_reg == ST_HAVE_KS) && ks_valid && (!dout_valid || (dout_valid && dout_ready));
 
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin

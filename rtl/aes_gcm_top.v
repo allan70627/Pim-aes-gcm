@@ -20,18 +20,98 @@ module aes_gcm_top (
   output wire [127:0] tag_out,  output wire tag_out_valid,
   output wire         auth_fail
 );
-  // bring-up: simple pass-through on payload; AAD consumed immediately
-  assign aad_ready   = 1'b1;
 
-  assign din_ready   = dout_ready;
-  assign dout_valid  = din_valid;
-  assign dout_last   = din_last;
-  assign dout_data   = din_data;
-  assign dout_keep   = din_keep;
+  // Wires between datapath and controller
+  wire [127:0] tag_pre_xor_w;
+  wire         tag_pre_xor_valid_w;
+  wire [127:0] tagmask_w;
+  wire         tagmask_valid_w;
+  wire         aad_done_w, pld_done_w, lens_done_w;
 
-  assign tag_out       = 128'h0;
-  assign tag_out_valid = 1'b0;
-  assign auth_fail     = 1'b0;
+  // Datapath: AES/GHASH + payload I/O + tag components
+  aes_gcm_datapath u_datapath (
+    .clk           (clk),
+    .rst_n         (rst_n),
+    .key_in        (key_in),
+    .key_we        (key_we),
+    .aes256_en     (aes256_en),
+    .iv_in         (iv_in),
+    .iv_we         (iv_we),
+    .len_aad_bits  (len_aad_bits),
+    .len_pld_bits  (len_pld_bits),
+    .start         (start),
+    .enc_mode      (enc_mode),
+    // AAD
+    .aad_valid     (aad_valid),
+    .aad_ready     (aad_ready),
+    .aad_last      (aad_last),
+    .aad_data      (aad_data),
+    .aad_keep      (aad_keep),
+    // Payload in/out
+    .din_valid     (din_valid),
+    .din_ready     (din_ready),
+    .din_last      (din_last),
+    .din_data      (din_data),
+    .din_keep      (din_keep),
+    .dout_valid    (dout_valid),
+    .dout_ready    (dout_ready),
+    .dout_last     (dout_last),
+    .dout_data     (dout_data),
+    .dout_keep     (dout_keep),
+    // Tag components + status
+    .tag_pre_xor        (tag_pre_xor_w),
+    .tag_pre_xor_valid  (tag_pre_xor_valid_w),
+    .tagmask            (tagmask_w),
+    .tagmask_valid      (tagmask_valid_w),
+    .aad_done           (aad_done_w),
+    .pld_done           (pld_done_w),
+    .lens_done          (lens_done_w)
+  );
+
+  // Controller: builds final tag / auth decision, observes handshakes
+  aes_gcm_ctrl u_ctrl (
+    .clk            (clk),
+    .rst_n          (rst_n),
+    .start          (start),
+    .enc_mode       (enc_mode),
+    .len_aad_bits   (len_aad_bits),
+    .len_pld_bits   (len_pld_bits),
+    .iv_we          (iv_we),
+    // AAD handshake
+    .aad_valid      (aad_valid),
+    .aad_ready      (aad_ready),
+    .aad_last       (aad_last),
+    .aad_keep       (aad_keep),
+    // Payload handshakes
+    .din_valid      (din_valid),
+    .din_ready      (din_ready),
+    .din_last       (din_last),
+    .din_keep       (din_keep),
+    .dout_valid     (dout_valid),
+    .dout_ready     (dout_ready),
+    .dout_last      (dout_last),
+    // Framing / ext tag input
+    .tag_in         (tag_in),
+    .tag_in_we      (tag_in_we),
+    // From datapath
+    .tag_pre_xor        (tag_pre_xor_w),
+    .tag_pre_xor_valid  (tag_pre_xor_valid_w),
+    .tagmask            (tagmask_w),
+    .tagmask_valid      (tagmask_valid_w),
+    .aad_done           (aad_done_w),
+    .pld_done           (pld_done_w),
+    .lens_done          (lens_done_w),
+    // Control outputs (not consumed at this top level)
+    .ctr_load_iv    (/* unused */),
+    .ghash_init     (/* unused */),
+    .tagmask_start  (/* unused */),
+    .phase          (/* unused */),
+    // Outputs to top
+    .tag_out        (tag_out),
+    .tag_out_valid  (tag_out_valid),
+    .auth_fail      (auth_fail)
+  );
+
 endmodule
 
 `default_nettype wire
