@@ -44,7 +44,6 @@ module chacha_poly1305_adapter (
     localparam FINAL  = 4'd6;
     localparam DONE   = 4'd7;
 
-    // Sub-stage for knowing which data we are processing
     localparam ST_AAD   = 3'd0;
     localparam ST_PAYLD = 3'd1;
     localparam ST_LEN   = 3'd2;
@@ -55,7 +54,6 @@ module chacha_poly1305_adapter (
     reg [257:0] acc;
     reg [127:0] r_key, s_key;
 
-    // Pulse signals for multiplier and reducer
     reg start_mul, start_reduce;
 
     wire [257:0] mul_out;
@@ -84,7 +82,9 @@ module chacha_poly1305_adapter (
         .done(reduce_done)
     );
 
-    // Sequential FSM
+    // -----------------------------
+    // Sequential FSM registers
+    // -----------------------------
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
             state <= IDLE;
@@ -106,42 +106,66 @@ module chacha_poly1305_adapter (
             prev_stage <= ST_AAD;
         end else begin
             state <= next_state;
-            start_mul <= 0;      // always 1-cycle pulse
-            start_reduce <= 0;   // always 1-cycle pulse
+
+            // reset pulse signals
+            start_mul <= 0;
+            start_reduce <= 0;
+
+            // Capture keys and accumulator updates in sequential always
+            if(state == IDLE && start && algo_sel) begin
+                r_key <= key[127:0];
+                s_key <= key[255:128];
+                acc <= 0;
+            end
+
+            // Update accumulator after multiplier or input
+            if(state == AAD && aad_valid) begin
+                acc <= acc + {128'b0, 2'b0, aad_data};
+            end else if(state == PAYLD && pld_valid) begin
+                acc <= acc + {128'b0, 2'b0, pld_data};
+            end else if(state == LEN && len_valid) begin
+                acc <= acc + {128'b0, 2'b0, len_block};
+            end
+
+            // Update accumulator after reduction
+            if(state == REDUCE && reduce_done) begin
+                acc[129:0] <= reduce_out;
+            end
+
+            // Generate final outputs
+            if(state == FINAL) begin
+                tag_pre_xor <= acc[127:0] + s_key;
+                tag_pre_xor_valid <= 1'b1;
+                tagmask <= {r_key, 32'h0};
+                tagmask_valid <= 1'b1;
+            end
         end
     end
 
-    // Combinational FSM
+    // -----------------------------
+    // Combinational FSM next-state
+    // -----------------------------
     always @* begin
-        // Defaults
         next_state = state;
-        aad_ready = 0;
-        pld_ready = 0;
-        len_ready = 0;
-        start_mul = 0;
-        start_reduce = 0;
-        aad_done = 0;
-        pld_done = 0;
-        lens_done = 0;
-        tag_pre_xor_valid = 0;
-        tagmask_valid = 0;
+
+        // Default ready/done
+        aad_ready = 0; pld_ready = 0; len_ready = 0;
+        aad_done = 0; pld_done = 0; lens_done = 0;
+        start_mul = 0; start_reduce = 0;
+        tag_pre_xor_valid = 0; tagmask_valid = 0;
 
         case(state)
             IDLE: begin
                 if(start && algo_sel) begin
-                    r_key = key[127:0];
-                    s_key = key[255:128];
-                    acc = 0;
-                    aad_ready = 1;
                     next_state = AAD;
                     prev_stage = ST_AAD;
+                    aad_ready = 1;
                 end
             end
 
             AAD: begin
                 aad_ready = 1;
                 if(aad_valid) begin
-                    acc = acc + {128'b0, 2'b0, aad_data}; // extend to 258 bits
                     start_mul = 1'b1;
                     next_state = MUL;
                     prev_stage = ST_AAD;
@@ -151,7 +175,6 @@ module chacha_poly1305_adapter (
             PAYLD: begin
                 pld_ready = 1;
                 if(pld_valid) begin
-                    acc = acc + {128'b0, 2'b0, pld_data};
                     start_mul = 1'b1;
                     next_state = MUL;
                     prev_stage = ST_PAYLD;
@@ -161,7 +184,6 @@ module chacha_poly1305_adapter (
             LEN: begin
                 len_ready = 1;
                 if(len_valid) begin
-                    acc = acc + {128'b0, 2'b0, len_block};
                     start_mul = 1'b1;
                     next_state = MUL;
                     prev_stage = ST_LEN;
@@ -169,7 +191,6 @@ module chacha_poly1305_adapter (
             end
 
             MUL: begin
-                // Wait for multiplier done
                 if(mul_done) begin
                     start_reduce = 1'b1;
                     next_state = REDUCE;
@@ -177,10 +198,7 @@ module chacha_poly1305_adapter (
             end
 
             REDUCE: begin
-                // Wait for reducer done
                 if(reduce_done) begin
-                    acc[129:0] = reduce_out;
-
                     case(prev_stage)
                         ST_AAD: begin
                             aad_done = 1'b1;
@@ -199,10 +217,6 @@ module chacha_poly1305_adapter (
             end
 
             FINAL: begin
-                tag_pre_xor = acc[127:0] + s_key;
-                tag_pre_xor_valid = 1'b1;
-                tagmask = {r_key, 32'h0};
-                tagmask_valid = 1'b1;
                 next_state = DONE;
             end
 
@@ -211,4 +225,5 @@ module chacha_poly1305_adapter (
             end
         endcase
     end
+
 endmodule
