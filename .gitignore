@@ -30,3 +30,7 @@ waves/
 *.saif
 build/
 rtl/aes_gcm_passthrough.v
+syn/fv/
+syn/genus.cmd*
+syn/genus.log*
+syn/.rs_*.tstamp
