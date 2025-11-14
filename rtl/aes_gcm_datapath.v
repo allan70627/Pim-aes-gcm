@@ -1,11 +1,12 @@
 `default_nettype none
 
 // -----------------------------------------------------------------------------
-// AES-GCM datapath
+// AES-GCM datapath with optional ChaCha keystream
 // - Single shared aes_core used for H, tagmask, and CTR keystream
 // - 96-bit IV fast-path: J0 = {IV, 0^31, 1}
 // - GHASH absorbs: AAD -> CIPHERTEXT -> lengths block
 // - Tag pre-xor from GHASH; tagmask = AES(K, J0)
+// - ChaCha added: algo_sel = 1 selects ChaCha
 // -----------------------------------------------------------------------------
 module aes_gcm_datapath (
     input  wire         clk,
@@ -44,11 +45,11 @@ module aes_gcm_datapath (
     output wire         aad_done,
     output wire         pld_done,
     output wire         lens_done,
-    input  wire         algo_sel   // <--- NEW
+    input  wire         algo_sel   // 0=AES, 1=ChaCha
 );
 
     // ------------------------------------------------------------------
-    // Local parameters and helper functions
+    // Local parameters: FSM states
     // ------------------------------------------------------------------
     localparam PH_IDLE    = 3'd0;
     localparam PH_AAD     = 3'd1;
@@ -57,6 +58,9 @@ module aes_gcm_datapath (
     localparam PH_WAIT    = 3'd4;
     localparam PH_DONE    = 3'd5;
 
+    // ------------------------------------------------------------------
+    // Function: mask bytes according to keep signals
+    // ------------------------------------------------------------------
     function automatic [127:0] mask_block;
         input [127:0] data;
         input [15:0]  keep;
@@ -69,24 +73,22 @@ module aes_gcm_datapath (
     endfunction
 
     // ------------------------------------------------------------------
-    // Registers and wires
+    // Internal registers / wires
     // ------------------------------------------------------------------
-    reg         start_d;
-    reg         enc_mode_reg;
-    reg [63:0]  len_aad_bits_reg;
-    reg [63:0]  len_pld_bits_reg;
-    reg [2:0]   phase_reg, phase_next;
-    // Treat AAD / PAYLOAD / LEN / WAIT as the active processing window
+    reg         start_d;              // Delayed start pulse
+    reg         enc_mode_reg;         // Encryption/decryption mode
+    reg [63:0]  len_aad_bits_reg;     // AAD length
+    reg [63:0]  len_pld_bits_reg;     // Payload length
+    reg [2:0]   phase_reg, phase_next; // FSM phase
     wire dp_active = (phase_reg != PH_IDLE) && (phase_reg != PH_DONE);
 
-
-    reg [127:0] H_reg;
-    reg         h_ready_reg;
-    reg [127:0] pld_buf_data_reg;
-    reg         pld_buf_valid_reg;
-    reg         pld_buf_last_reg;
-    reg         payload_pending_reg;
-    reg         dout_valid_q;
+    reg [127:0] H_reg;                // GHASH key H
+    reg         h_ready_reg;          // H ready flag
+    reg [127:0] pld_buf_data_reg;     // Payload buffer
+    reg         pld_buf_valid_reg;    // Payload buffer valid
+    reg         pld_buf_last_reg;     // Payload buffer last flag
+    reg         payload_pending_reg;  // Payload in flight
+    reg         dout_valid_q;         // Delayed dout valid
     reg         aad_done_reg;
     reg         pld_done_reg;
     reg         lens_done_reg;
@@ -95,7 +97,7 @@ module aes_gcm_datapath (
     reg [127:0] tag_pre_xor_reg;
     reg         tag_pre_xor_valid_reg;
 
-    // Key and IV handling
+    // Key / IV
     reg [255:0] key_active_reg;
     reg         keylen_active_reg;
     reg         key_init_pending_reg;
@@ -120,72 +122,74 @@ module aes_gcm_datapath (
     wire [127:0] ghash_Y;
     wire         ghash_Y_valid;
     wire [127:0] len_block;
-
     reg          ghash_valid_int;
     reg [127:0]  ghash_data_int;
     reg          ghash_last_int;
 
     // ------------------------------------------------------------------
-    // Algorithm selection (for now, hard-wired to AES)
+    // Algorithm selection
     // ------------------------------------------------------------------
-    localparam ALGO_AES    = 1'b0;
-    localparam ALGO_CHACHA = 1'b1;
-
-    // come from a CSR / ctrl.
     wire algo_is_chacha = algo_sel;
+    wire chacha_cfg_we  = algo_is_chacha && start && !start_d;
 
-    // cfg_we for ChaCha keystream unit:
-    // latch key/nonce/counter when we see a start in ChaCha mode.
-    wire chacha_cfg_we = algo_is_chacha && start;
-
-    // ------------------------------------------------------------------
-    // CTR XOR connection (generic keystream interface)
-    // ------------------------------------------------------------------
-    wire         ks_req;      // from ctr_xor to keystream producer(s)
-    wire         ks_valid;    // selected keystream valid (AES or ChaCha)
-    wire [127:0] ks_data;     // selected keystream data
-
-    // AES-specific keystream signals (today AES is the only producer)
-    // Later we will add ks_valid_chacha / ks_data_chacha and mux them.
-    wire         ks_valid_aes;
-    reg  [127:0] ks_data_aes_reg;
-    wire [127:0] ks_data_aes = ks_data_aes_reg;
-
-    // ChaCha-specific keystream (stubbed for now)
     wire         ks_valid_chacha;
     wire [127:0] ks_data_chacha;
+    reg ks_req;
 
+    // AES keystream
+    reg  [127:0] ks_data_aes_reg;
+    reg          ks_valid_aes_reg;
+    wire [127:0] ks_data_aes = ks_data_aes_reg;
+    wire ks_valid_aes = ks_valid_aes_reg;
 
-    // CTR XOR connection
-    // wire         ks_req;
-    // wire         ks_valid;
-    // reg  [127:0] ks_data_reg;
-    // wire [127:0] ks_data = ks_data_reg;
+    // Keystream mux
+    wire ks_valid = algo_is_chacha ? ks_valid_chacha : ks_valid_aes;
+    wire [127:0] ks_data = algo_is_chacha ? ks_data_chacha : ks_data_aes;
 
-    wire         payload_channel_active = (phase_reg == PH_PAYLOAD);
-    wire         ctr_dout_valid;
+    // ------------------------------------------------------------------
+    // ChaCha keystream unit (stub)
+    // ------------------------------------------------------------------
+    chacha_keystream_unit u_chacha_ks (
+        .clk             (clk),
+        .rst_n           (rst_n),
+        .chacha_key      (key_active_reg),
+        .chacha_nonce    (iv_reg),
+        .chacha_ctr_init (32'd1),
+        .cfg_we          (chacha_cfg_we),
+        .ks_req          (algo_is_chacha ? ks_req : 1'b0), 
+        .ks_valid        (ks_valid_chacha),
+        .ks_data         (ks_data_chacha)
+    );
+
+    // ------------------------------------------------------------------
+    // Payload / CTR handshake
+    // ------------------------------------------------------------------
+    wire payload_channel_active = (phase_reg == PH_PAYLOAD);
+    wire ctr_dout_valid;
     wire [127:0] ctr_dout_data;
     wire [15:0]  ctr_dout_keep;
-    wire         ctr_dout_last;
+    wire ctr_dout_last;
     wire [127:0] payload_data_masked_out = mask_block(ctr_dout_data, ctr_dout_keep);
 
-    wire         aad_handshake          = (phase_reg == PH_AAD) && ghash_valid_int;
-    wire         aad_last_handshake     = aad_handshake && aad_last;
-    wire         payload_din_handshake  = payload_channel_active && din_valid && din_ready;
-    wire         payload_dout_handshake = payload_channel_active && ctr_dout_valid && dout_ready;
-    wire         load_pld_buf_dec       = !enc_mode_reg && payload_din_handshake  && !pld_buf_valid_reg && h_ready_reg;
-    wire         load_pld_buf_enc       =  enc_mode_reg && payload_dout_handshake && !pld_buf_valid_reg && h_ready_reg;
-    wire         load_pld_buf           = load_pld_buf_dec | load_pld_buf_enc;
+    wire aad_handshake          = (phase_reg == PH_AAD) && ghash_valid_int;
+    wire aad_last_handshake     = aad_handshake && aad_last;
+    wire payload_din_handshake  = payload_channel_active && din_valid && din_ready;
+    wire payload_dout_handshake = payload_channel_active && ctr_dout_valid && dout_ready;
+    wire load_pld_buf_dec       = !enc_mode_reg && payload_din_handshake  && !pld_buf_valid_reg && h_ready_reg;
+    wire load_pld_buf_enc       =  enc_mode_reg && payload_dout_handshake && !pld_buf_valid_reg && h_ready_reg;
+    wire load_pld_buf           = load_pld_buf_dec | load_pld_buf_enc;
     wire [127:0] pld_buf_data_load      = load_pld_buf_dec ? payload_data_masked_in : payload_data_masked_out;
     wire         pld_buf_last_load      = load_pld_buf_dec ? din_last : ctr_dout_last;
     wire         consume_pld_buf        = payload_channel_active && pld_buf_valid_reg && ghash_din_ready;
     wire         consume_pld_buf_last   = consume_pld_buf && pld_buf_last_reg;
-    wire         len_handshake          = (phase_reg == PH_LEN) && len_pending_reg && ghash_din_ready;
+    wire         len_handshake          = (phase_reg == PH_LEN) && len_pending_reg;
     wire         payload_last_handshake = enc_mode_reg ? (payload_dout_handshake && ctr_dout_last)
                                                       : (payload_din_handshake && din_last);
     wire         dout_valid_rise        = ctr_dout_valid && !dout_valid_q;
 
+    // ------------------------------------------------------------------
     // AES core control
+    // ------------------------------------------------------------------
     reg         aes_init_reg;
     reg         aes_next_reg;
     reg [127:0] aes_block_reg;
@@ -194,26 +198,27 @@ module aes_gcm_datapath (
     wire        aes_result_valid;
 
     // Task tracking
-    reg         ctr_pending_reg;   // waiting for CTR aes_result
+    reg         ctr_pending_reg;
     reg         tagmask_pending_reg;
-    reg         tagmask_valid_reg;
     reg [127:0] tagmask_reg;
+    reg         tagmask_valid_reg;
     reg         ctr_consuming;
     reg         tagmask_consuming;
     reg         h_consuming;
 
     // ------------------------------------------------------------------
-    // Sequential logic
+    // Sequential: start pulse
     // ------------------------------------------------------------------
-    
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
+        if (!rst_n)
             start_d <= 1'b0;
-        end else begin
+        else
             start_d <= start;
-        end
     end
 
+    // ------------------------------------------------------------------
+    // Sequential: capture key/IV/start lengths
+    // ------------------------------------------------------------------
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             enc_mode_reg         <= 1'b0;
@@ -244,6 +249,9 @@ module aes_gcm_datapath (
         end
     end
 
+    // ------------------------------------------------------------------
+    // Sequential: capture H
+    // ------------------------------------------------------------------
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             H_reg       <= 128'h0;
@@ -259,14 +267,9 @@ module aes_gcm_datapath (
         end
     end
 
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            phase_reg <= PH_IDLE;
-        end else begin
-            phase_reg <= phase_next;
-        end
-    end
-
+    // ------------------------------------------------------------------
+    // Sequential: register payload buffer
+    // ------------------------------------------------------------------
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             pld_buf_valid_reg <= 1'b0;
@@ -289,173 +292,24 @@ module aes_gcm_datapath (
         end
     end
 
+    // ------------------------------------------------------------------
+    // Sequential: AES keystream valid pulse
+    // ------------------------------------------------------------------
     always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            payload_pending_reg <= 1'b0;
-            dout_valid_q        <= 1'b0;
-        end else begin
-            dout_valid_q <= ctr_dout_valid;
-
-            if (start_pulse) begin
-                payload_pending_reg <= 1'b0;
-            end else begin
-                if (payload_din_handshake) begin
-                    payload_pending_reg <= 1'b1;
-                end else if (dout_valid_rise) begin
-                    payload_pending_reg <= 1'b0;
-                end
-            end
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            aad_done_reg <= 1'b0;
-        end else if (start_pulse) begin
-            aad_done_reg <= no_aad_start;
-        end else if (aad_last_handshake) begin
-            aad_done_reg <= 1'b1;
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            pld_done_reg <= 1'b0;
-        end else if (start_pulse) begin
-            pld_done_reg <= no_pld_start;
-        end else if (payload_last_handshake) begin
-            pld_done_reg <= 1'b1;
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            lens_done_reg <= 1'b0;
-        end else if (start_pulse) begin
-            lens_done_reg <= 1'b0;
-        end else if (len_handshake) begin
-            lens_done_reg <= 1'b1;
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            pld_consumed_last_reg <= 1'b1;
-        end else if (start_pulse) begin
-            pld_consumed_last_reg <= no_pld_start;
-        end else begin
-            if (load_pld_buf) begin
-                pld_consumed_last_reg <= 1'b0;
-            end else if (consume_pld_buf_last) begin
-                pld_consumed_last_reg <= 1'b1;
-            end
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            len_pending_reg <= 1'b0;
-        end else if (start_pulse) begin
-            len_pending_reg <= 1'b1;
-        end else if (len_handshake) begin
-            len_pending_reg <= 1'b0;
-        end
-    end
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            tag_pre_xor_reg       <= 128'h0;
-            tag_pre_xor_valid_reg <= 1'b0;
-        end else if (start_pulse) begin
-            tag_pre_xor_reg       <= 128'h0;
-            tag_pre_xor_valid_reg <= 1'b0;
-        end else begin
-            if (ghash_Y_valid) begin
-                tag_pre_xor_reg       <= ghash_Y;
-                tag_pre_xor_valid_reg <= 1'b1;
-            end
-        end
+        if (!rst_n)
+            ks_valid_aes_reg <= 1'b0;
+        else
+            ks_valid_aes_reg <= aes_result_valid && ctr_consuming;
     end
 
     // ------------------------------------------------------------------
-    // GHASH input routing
+    // Assign tagmask / valid
     // ------------------------------------------------------------------
-    always @* begin
-        ghash_valid_int = 1'b0;
-        ghash_data_int  = 128'h0;
-        ghash_last_int  = 1'b0;
-
-        case (phase_reg)
-            PH_AAD: begin
-                if (ghash_din_ready && aad_valid) begin
-                    ghash_valid_int = 1'b1;
-                    ghash_data_int  = aad_data_masked;
-                end
-            end
-            PH_PAYLOAD: begin
-                if (ghash_din_ready && pld_buf_valid_reg) begin
-                    ghash_valid_int = 1'b1;
-                    ghash_data_int  = pld_buf_data_reg;
-                end
-            end
-            PH_LEN: begin
-                if (ghash_din_ready && len_pending_reg) begin
-                    ghash_valid_int = 1'b1;
-                    ghash_data_int  = len_block;
-                    ghash_last_int  = 1'b1;
-                end
-            end
-            default: begin
-            end
-        endcase
-    end
-
-    // Phase transitions
-    always @* begin
-        phase_next = phase_reg;
-
-        if (start_pulse) begin
-            if (!no_aad_start) begin
-                phase_next = PH_AAD;
-            end else if (!no_pld_start) begin
-                phase_next = PH_PAYLOAD;
-            end else begin
-                phase_next = PH_LEN;
-            end
-        end else begin
-            case (phase_reg)
-                PH_IDLE: begin
-                end
-                PH_AAD: begin
-                    if (aad_last_handshake) begin
-                        if (no_pld) phase_next = PH_LEN; else phase_next = PH_PAYLOAD;
-                    end
-                end
-                PH_PAYLOAD: begin
-                    if (pld_consumed_last_reg && !pld_buf_valid_reg && !payload_pending_reg && !ctr_dout_valid) begin
-                        phase_next = PH_LEN;
-                    end
-                end
-                PH_LEN: begin
-                    if (len_handshake) begin
-                        phase_next = PH_WAIT;
-                    end
-                end
-                PH_WAIT: begin
-                    if (ghash_Y_valid) begin
-                        phase_next = PH_DONE;
-                    end
-                end
-                PH_DONE: begin
-                    phase_next = PH_IDLE;
-                end
-                default: phase_next = PH_IDLE;
-            endcase
-        end
-    end
+    assign tagmask       = tagmask_reg;
+    assign tagmask_valid = tagmask_valid_reg;
 
     // ------------------------------------------------------------------
-    // Ready/valid signals to external
+    // External ready/valid signals
     // ------------------------------------------------------------------
     assign aad_ready = (phase_reg == PH_AAD) && ghash_din_ready && h_ready_reg;
     assign din_ready = payload_channel_active &&
@@ -476,7 +330,7 @@ module aes_gcm_datapath (
     assign lens_done         = lens_done_reg;
 
     // ------------------------------------------------------------------
-    // Submodule instances
+    // Submodules
     // ------------------------------------------------------------------
     gcm_lenblock u_gcm_lenblock (
         .len_aad_bits (len_aad_bits_reg),
@@ -497,7 +351,6 @@ module aes_gcm_datapath (
         .Y_valid   (ghash_Y_valid)
     );
 
-    // CTR XOR (consume keystream from centralized AES)
     ctr_xor u_ctr_xor (
         .clk        (clk),
         .rst_n      (rst_n),
@@ -526,7 +379,6 @@ module aes_gcm_datapath (
         .ctr_valid (ctr_valid)
     );
 
-    // Central AES core
     aes_core u_aes_core (
         .clk          (clk),
         .reset_n      (rst_n),
@@ -541,129 +393,6 @@ module aes_gcm_datapath (
         .result_valid (aes_result_valid)
     );
 
-    // ChaCha keystream unit (currently stubbed; algo_is_chacha = 0 so unused)
-    chacha_keystream_unit u_chacha_ks (
-        .clk             (clk),
-        .rst_n           (rst_n),
-        .chacha_key      (key_active_reg),   // reuse key path in ChaCha mode
-        .chacha_nonce    (iv_in),            // reuse IV as nonce in ChaCha mode
-        .chacha_ctr_init (32'd1),           // typical starting counter
-        .cfg_we          (chacha_cfg_we),            // TODO: pulse on key/iv write in ChaCha mode
-        .ks_req          (algo_is_chacha ? ks_req : 1'b0),
-        .ks_valid        (ks_valid_chacha),
-        .ks_data         (ks_data_chacha)
-    );
-
-    // ------------------------------------------------------------------
-    // AES task scheduler: priority CTR > TAGMASK > H; INIT asap on key change
-    // ------------------------------------------------------------------
-    wire aes_task_en = dp_active | aes_init_reg | aes_next_reg | aes_result_valid
-                    | ctr_pending_reg | tagmask_pending_reg | h_pending_reg;
-
-
-    always @(posedge clk or negedge rst_n) begin
-        if (!rst_n) begin
-            aes_init_reg          <= 1'b0;
-            aes_next_reg          <= 1'b0;
-            aes_block_reg         <= 128'h0;
-            ks_data_aes_reg       <= 128'h0;
-            ctr_pending_reg       <= 1'b0;
-            ctr_next_reg          <= 1'b0;
-            tagmask_pending_reg   <= 1'b0;
-            tagmask_reg           <= 128'h0;
-            tagmask_valid_reg     <= 1'b0;
-            ctr_consuming         <= 1'b0;
-            tagmask_consuming     <= 1'b0;
-            h_consuming           <= 1'b0;
-        end else if (aes_task_en) begin
-            aes_init_reg      <= 1'b0; // default pulse
-            aes_next_reg      <= 1'b0; // default pulse
-            ctr_next_reg      <= 1'b0;
-
-            // Reset tagmask_valid on new message
-            if (start_pulse) begin
-                tagmask_pending_reg <= 1'b1; // compute early
-                tagmask_valid_reg   <= 1'b0;
-            end
-
-            // Request keystream for each block request
-            if (ks_req && !ctr_pending_reg) begin
-                // Kick counter to produce next block
-                ctr_next_reg    <= 1'b1;
-                ctr_pending_reg <= 1'b1;
-            end
-
-            // AES INIT on key change
-            if (key_init_pending_reg && aes_ready) begin
-                aes_init_reg          <= 1'b1;
-                key_init_pending_reg  <= 1'b0;
-            end
-
-            // Schedule CTR encryption if pending and a block is ready
-            if (ctr_pending_reg && ctr_valid && aes_ready) begin
-                aes_block_reg   <= ctr_block;
-                aes_next_reg    <= 1'b1;
-                ctr_consuming   <= 1'b1;
-                tagmask_consuming <= 1'b0;
-                h_consuming     <= 1'b0;
-                ctr_pending_reg <= 1'b0; // waiting for result now
-            end else if (tagmask_pending_reg && aes_ready && !ks_req) begin
-                // Tagmask when AES is free and no CTR request
-                aes_block_reg     <= {iv_reg, 32'h00000001};
-                aes_next_reg      <= 1'b1;
-                tagmask_consuming <= 1'b1;
-                ctr_consuming     <= 1'b0;
-                h_consuming       <= 1'b0;
-                tagmask_pending_reg <= 1'b0;
-            end else if (h_pending_reg && aes_ready && !ks_req) begin
-                // Compute H = AES(K, 0^128) when free and no CTR pressure
-                aes_block_reg   <= 128'h0;
-                aes_next_reg    <= 1'b1;
-                h_consuming     <= 1'b1;
-                ctr_consuming   <= 1'b0;
-                tagmask_consuming <= 1'b0;
-                h_pending_reg   <= 1'b0;
-            end
-
-            // Capture AES result
-            if (aes_result_valid) begin
-                if (ctr_consuming) begin
-                    ks_data_aes_reg   <= aes_result;
-                end else if (tagmask_consuming) begin
-                    tagmask_reg       <= aes_result;
-                    tagmask_valid_reg <= 1'b1;
-                end else if (h_consuming) begin
-                    // H captured in H_reg in its own always block
-                end
-                ctr_consuming       <= 1'b0;
-                tagmask_consuming   <= 1'b0;
-                h_consuming         <= 1'b0;
-            end
-        end
-    end
-
-
-    // AES keystream valid
-    assign ks_valid_aes  = aes_result_valid && ctr_consuming;
-
-    // ------------------------------------------------------------------
-    // Keystream producer selection
-    // Currently algo_is_chacha is hard-wired 0, so this is equivalent
-    // to the old behavior (AES only).
-    // ------------------------------------------------------------------
-    assign ks_valid = algo_is_chacha ? ks_valid_chacha : ks_valid_aes;
-    assign ks_data  = algo_is_chacha ? ks_data_chacha  : ks_data_aes;
-
-    assign tagmask       = tagmask_reg;
-    assign tagmask_valid = tagmask_valid_reg;
-
-
 endmodule
 
 `default_nettype wire
-
-
-
-
-
-
