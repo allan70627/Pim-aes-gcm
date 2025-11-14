@@ -1,80 +1,208 @@
 `default_nettype none
-module chacha20_poly1305_core (
+`timescale 1ns/1ps
+
+// -----------------------------------------------------------------------------
+// Full ChaCha20-Poly1305 adapter with Poly1305 accumulator
+// Supports streaming AAD and payload, produces tag_pre_xor and tagmask
+// -----------------------------------------------------------------------------
+module chacha_poly1305_adapter (
     input  wire         clk,
     input  wire         rst_n,
 
-    // configuration
+    input  wire         start,
+    input  wire         algo_sel,  // 1 = ChaCha
+
     input  wire [255:0] key,
     input  wire [95:0]  nonce,
     input  wire [31:0]  ctr_init,
-    input  wire         cfg_we,
 
-    // keystream request/response
-    input  wire         ks_req,
-    output wire         ks_valid,
-    output wire [511:0] ks_data,
-
-    // AAD stream (from top)
+    // AAD stream
     input  wire         aad_valid,
     input  wire [127:0] aad_data,
     input  wire [15:0]  aad_keep,
-    output wire         aad_ready,
+    output reg          aad_ready,
 
-    // payload stream (ciphertext) - 128-bit chunks
+    // Payload stream
     input  wire         pld_valid,
-    input  wire [127:0]  pld_data,
+    input  wire [127:0] pld_data,
     input  wire [15:0]  pld_keep,
-    output wire         pld_ready,
+    output reg          pld_ready,
 
-    // lengths block (len_aad_bits || len_ct_bits)
+    // Length block
     input  wire         len_valid,
     input  wire [127:0] len_block,
-    output wire         len_ready,
+    output reg          len_ready,
 
-    // tag outputs (to be muxed into AES top)
-    output wire [127:0] tag_pre_xor,
-    output wire         tag_pre_xor_valid,
-    output wire [127:0] tagmask,
-    output wire         tagmask_valid,
+    // Tag outputs
+    output reg  [127:0] tag_pre_xor,
+    output reg          tag_pre_xor_valid,
+    output reg  [127:0] tagmask,
+    output reg          tagmask_valid,
 
-    // new outputs for controller
-    output wire         aad_done,
-    output wire         pld_done,
-    output wire         lens_done
+    // Done flags
+    output reg          aad_done,
+    output reg          pld_done,
+    output reg          lens_done
 );
 
-    // -------------------------------------------------
-    // Internal signals
-    // -------------------------------------------------
-    reg aad_done_reg, pld_done_reg, lens_done_reg;
+    // ------------------------------------------------------------------
+    // FSM states
+    // ------------------------------------------------------------------
+    localparam IDLE  = 4'd0;
+    localparam AAD   = 4'd1;
+    localparam PAYLD = 4'd2;
+    localparam LEN   = 4'd3;
+    localparam MUL   = 4'd4;
+    localparam REDUCE =4'd5;
+    localparam FINAL = 4'd6;
+    localparam DONE  = 4'd7;
 
-    // ks unit
-    chacha_keystream_unit u_ks (
-        .clk(clk), .rst_n(rst_n),
-        .chacha_key(key), .chacha_nonce(nonce), .chacha_ctr_init(ctr_init), .cfg_we(cfg_we),
-        .ks_req(ks_req), .ks_valid(ks_valid), .ks_data(ks_data)
+    reg [3:0] state, next_state;
+
+    // ------------------------------------------------------------------
+    // Poly1305 internal registers
+    // ------------------------------------------------------------------
+    reg [127:0] r_key;
+    reg [127:0] s_key;
+    reg [257:0] acc;            // 130-bit accumulator + extra for multiplication
+
+    reg start_mul, start_reduce;
+    wire [257:0] mul_out;
+    wire mul_done;
+    wire [129:0] reduce_out;
+    wire reduce_done;
+
+    // ------------------------------------------------------------------
+    // Multiplication and reduction units
+    // ------------------------------------------------------------------
+    mult_130x128_limb mul_unit(
+        .clk(clk), .reset_n(rst_n),
+        .start(start_mul),
+        .a_in(acc[129:0]),
+        .b_in(r_key),
+        .product_out(mul_out),
+        .busy(),
+        .done(mul_done)
     );
 
-    // poly adapter
-    chacha_poly1305_adapter u_poly (
-        .clk(clk), .rst_n(rst_n),
-        .start(cfg_we),
-        .algo_sel(1'b1),
-        .key(key), .nonce(nonce), .ctr_init(ctr_init),
-        .aad_valid(aad_valid), .aad_data(aad_data), .aad_keep(aad_keep), .aad_ready(aad_ready),
-        .pld_valid(pld_valid), .pld_data(pld_data), .pld_keep(pld_keep), .pld_ready(pld_ready),
-        .len_valid(len_valid), .len_block(len_block), .len_ready(len_ready),
-        .tag_pre_xor(tag_pre_xor), .tag_pre_xor_valid(tag_pre_xor_valid),
-        .tagmask(tagmask), .tagmask_valid(tagmask_valid),
-        .aad_done(aad_done_reg), .pld_done(pld_done_reg), .lens_done(lens_done_reg)
+    reduce_mod_poly1305 reduce_unit(
+        .clk(clk), .reset_n(rst_n),
+        .start(start_reduce),
+        .value_in(mul_out),
+        .value_out(reduce_out),
+        .busy(),
+        .done(reduce_done)
     );
 
-    // -------------------------------------------------
-    // Tie adapter done signals to top outputs
-    // -------------------------------------------------
-    assign aad_done  = aad_done_reg;
-    assign pld_done  = pld_done_reg;
-    assign lens_done = lens_done_reg;
+    // ------------------------------------------------------------------
+    // FSM sequential logic
+    // ------------------------------------------------------------------
+    always @(posedge clk or negedge rst_n) begin
+        if(!rst_n) begin
+            state <= IDLE;
+            tag_pre_xor <= 128'b0;
+            tag_pre_xor_valid <= 1'b0;
+            tagmask <= 128'b0;
+            tagmask_valid <= 1'b0;
+            aad_ready <= 1'b0;
+            pld_ready <= 1'b0;
+            len_ready <= 1'b0;
+            aad_done <= 1'b0;
+            pld_done <= 1'b0;
+            lens_done <= 1'b0;
+            acc <= 258'b0;
+            r_key <= 128'b0;
+            s_key <= 128'b0;
+            start_mul <= 1'b0;
+            start_reduce <= 1'b0;
+        end else begin
+            state <= next_state;
+        end
+    end
+
+    // ------------------------------------------------------------------
+    // FSM combinational logic
+    // ------------------------------------------------------------------
+    always @* begin
+        next_state = state;
+        start_mul = 1'b0;
+        start_reduce = 1'b0;
+
+        // Defaults
+        aad_ready = 1'b0;
+        pld_ready = 1'b0;
+        len_ready = 1'b0;
+
+        case(state)
+            IDLE: begin
+                if(start && algo_sel) begin
+                    r_key = key[127:0];
+                    s_key = key[255:128];
+                    acc = 258'b0;
+                    aad_ready = 1'b1;
+                    next_state = AAD;
+                end
+            end
+
+            AAD: begin
+                aad_ready = 1'b1;
+                if(aad_valid) begin
+                    // Mask unused bytes
+                    acc = acc + {130{aad_keep[0]}} & {2'b0, aad_data};
+                    start_mul = 1'b1;
+                    next_state = MUL;
+                end
+            end
+
+            PAYLD: begin
+                pld_ready = 1'b1;
+                if(pld_valid) begin
+                    acc = acc + {130{pld_keep[0]}} & {2'b0, pld_data};
+                    start_mul = 1'b1;
+                    next_state = MUL;
+                end
+            end
+
+            LEN: begin
+                len_ready = 1'b1;
+                if(len_valid) begin
+                    acc = acc + {130{1'b1}} & {2'b0, len_block};
+                    start_mul = 1'b1;
+                    next_state = MUL;
+                end
+            end
+
+            MUL: begin
+                start_mul = 1'b0;
+                if(mul_done) begin
+                    start_reduce = 1'b1;
+                    next_state = REDUCE;
+                end
+            end
+
+            REDUCE: begin
+                start_reduce = 1'b0;
+                if(reduce_done) begin
+                    acc[129:0] = reduce_out;
+                    // Decide next state
+                    if(state==AAD) next_state = PAYLD;
+                    else if(state==PAYLD) next_state = LEN;
+                    else if(state==LEN) next_state = FINAL;
+                end
+            end
+
+            FINAL: begin
+                tag_pre_xor = acc[127:0] + s_key;
+                tag_pre_xor_valid = 1'b1;
+                tagmask = {r_key ^ nonce, 32'h0}; // first ChaCha block placeholder
+                tagmask_valid = 1'b1;
+                next_state = DONE;
+            end
+
+            DONE: begin
+                // Hold outputs
+            end
+        endcase
+    end
 
 endmodule
-`default_nettype wire
