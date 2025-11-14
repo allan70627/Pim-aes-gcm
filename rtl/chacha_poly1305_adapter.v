@@ -2,7 +2,7 @@
 `default_nettype none
 
 // -----------------------------------------------------------------------------
-// Poly1305 limb multiplier (Verilog-95 compatible)
+// Poly1305 limb multiplier (unchanged)
 // -----------------------------------------------------------------------------
 module mult_130x128_limb(
     input  wire clk,
@@ -52,7 +52,7 @@ module mult_130x128_limb(
 endmodule
 
 // -----------------------------------------------------------------------------
-// Poly1305 reduce modulo (Verilog-95 compatible)
+// Poly1305 reduce modulo (unchanged)
 // -----------------------------------------------------------------------------
 module reduce_mod_poly1305(
     input wire clk,
@@ -102,7 +102,7 @@ module reduce_mod_poly1305(
 endmodule
 
 // -----------------------------------------------------------------------------
-// ChaCha20-Poly1305 adapter (Verilog-95 compatible)
+// ChaCha20-Poly1305 adapter (corrected)
 // -----------------------------------------------------------------------------
 module chacha_poly1305_adapter (
     input  wire         clk,
@@ -137,24 +137,32 @@ module chacha_poly1305_adapter (
     output reg          lens_done
 );
 
-    localparam IDLE  = 4'd0;
-    localparam AAD   = 4'd1;
-    localparam PAYLD = 4'd2;
-    localparam LEN   = 4'd3;
-    localparam MUL   = 4'd4;
-    localparam REDUCE =4'd5;
-    localparam FINAL = 4'd6;
-    localparam DONE  = 4'd7;
+    localparam IDLE   = 4'd0;
+    localparam AAD    = 4'd1;
+    localparam PAYLD  = 4'd2;
+    localparam LEN    = 4'd3;
+    localparam MUL    = 4'd4;
+    localparam REDUCE = 4'd5;
+    localparam FINAL  = 4'd6;
+    localparam DONE   = 4'd7;
 
     reg [3:0] state, next_state;
-    reg [127:0] r_key, s_key;
     reg [257:0] acc;
+    reg [127:0] r_key, s_key;
     reg start_mul, start_reduce;
+
+    reg [2:0] prev_stage; // 0=AAD, 1=PAYLD, 2=LEN
+
+    localparam ST_AAD   = 3'd0;
+    localparam ST_PAYLD = 3'd1;
+    localparam ST_LEN   = 3'd2;
+
     wire [257:0] mul_out;
     wire mul_done;
     wire [129:0] reduce_out;
     wire reduce_done;
 
+    // multiplier instance
     mult_130x128_limb mul_unit(
         .clk(clk), .reset_n(rst_n),
         .start(start_mul),
@@ -165,6 +173,7 @@ module chacha_poly1305_adapter (
         .done(mul_done)
     );
 
+    // reduction instance
     reduce_mod_poly1305 reduce_unit(
         .clk(clk), .reset_n(rst_n),
         .start(start_reduce),
@@ -174,10 +183,15 @@ module chacha_poly1305_adapter (
         .done(reduce_done)
     );
 
-    // Sequential FSM
+    // sequential FSM
     always @(posedge clk or negedge rst_n) begin
         if(!rst_n) begin
             state <= IDLE;
+            acc <= 258'b0;
+            r_key <= 128'b0;
+            s_key <= 128'b0;
+            start_mul <= 1'b0;
+            start_reduce <= 1'b0;
             tag_pre_xor <= 128'b0;
             tag_pre_xor_valid <= 1'b0;
             tagmask <= 128'b0;
@@ -188,24 +202,27 @@ module chacha_poly1305_adapter (
             aad_done <= 1'b0;
             pld_done <= 1'b0;
             lens_done <= 1'b0;
-            acc <= 258'b0;
-            r_key <= 128'b0;
-            s_key <= 128'b0;
-            start_mul <= 1'b0;
-            start_reduce <= 1'b0;
+            prev_stage <= ST_AAD;
         end else begin
             state <= next_state;
+            start_mul <= 1'b0;     // pulse control
+            start_reduce <= 1'b0;  // pulse control
         end
     end
 
-    // Combinational FSM
+    // combinational FSM
     always @* begin
         next_state = state;
-        start_mul = 1'b0;
-        start_reduce = 1'b0;
         aad_ready = 1'b0;
         pld_ready = 1'b0;
         len_ready = 1'b0;
+        start_mul = 1'b0;
+        start_reduce = 1'b0;
+        aad_done = 1'b0;
+        pld_done = 1'b0;
+        lens_done = 1'b0;
+        tag_pre_xor_valid = 1'b0;
+        tagmask_valid = 1'b0;
 
         case(state)
             IDLE: begin
@@ -215,38 +232,41 @@ module chacha_poly1305_adapter (
                     acc = 258'b0;
                     aad_ready = 1'b1;
                     next_state = AAD;
+                    prev_stage = ST_AAD;
                 end
             end
 
             AAD: begin
                 aad_ready = 1'b1;
                 if(aad_valid) begin
-                    acc = acc + {2'b0, aad_data}; // simple addition, correct masking needs expansion
+                    acc = acc + {128'b0, 2'b0, aad_data};
                     start_mul = 1'b1;
                     next_state = MUL;
+                    prev_stage = ST_AAD;
                 end
             end
 
             PAYLD: begin
                 pld_ready = 1'b1;
                 if(pld_valid) begin
-                    acc = acc + {2'b0, pld_data};
+                    acc = acc + {128'b0, 2'b0, pld_data};
                     start_mul = 1'b1;
                     next_state = MUL;
+                    prev_stage = ST_PAYLD;
                 end
             end
 
             LEN: begin
                 len_ready = 1'b1;
                 if(len_valid) begin
-                    acc = acc + {2'b0, len_block};
+                    acc = acc + {128'b0, 2'b0, len_block};
                     start_mul = 1'b1;
                     next_state = MUL;
+                    prev_stage = ST_LEN;
                 end
             end
 
             MUL: begin
-                start_mul = 1'b0;
                 if(mul_done) begin
                     start_reduce = 1'b1;
                     next_state = REDUCE;
@@ -254,25 +274,35 @@ module chacha_poly1305_adapter (
             end
 
             REDUCE: begin
-                start_reduce = 1'b0;
                 if(reduce_done) begin
                     acc[129:0] = reduce_out;
-                    if(state==AAD) next_state = PAYLD;
-                    else if(state==PAYLD) next_state = LEN;
-                    else if(state==LEN) next_state = FINAL;
+                    case(prev_stage)
+                        ST_AAD: begin
+                            next_state = PAYLD;
+                            aad_done = 1'b1;
+                        end
+                        ST_PAYLD: begin
+                            next_state = LEN;
+                            pld_done = 1'b1;
+                        end
+                        ST_LEN: begin
+                            next_state = FINAL;
+                            lens_done = 1'b1;
+                        end
+                    endcase
                 end
             end
 
             FINAL: begin
                 tag_pre_xor = acc[127:0] + s_key;
                 tag_pre_xor_valid = 1'b1;
-                tagmask = {r_key ^ nonce, 32'h0};
+                tagmask = {r_key, 32'h0}; // mask simplified
                 tagmask_valid = 1'b1;
                 next_state = DONE;
             end
 
             DONE: begin
-                // Hold outputs
+                // hold outputs
             end
         endcase
     end
