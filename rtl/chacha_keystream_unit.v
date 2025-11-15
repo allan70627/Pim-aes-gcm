@@ -55,33 +55,43 @@ module chacha_keystream_unit (
     reg [1:0] state_reg, state_next;
     reg [31:0] ctr_next;
 
+    // Pulse register for core_next
+    reg core_next_pulse;
+
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state_reg <= S_IDLE;
             core_init_reg <= 1'b0;
             core_next_reg <= 1'b0;
+            core_next_pulse <= 1'b0;
             ctr_reg <= 32'h0;
             ks_valid <= 1'b0;
             ks_data <= 512'h0;
         end else begin
             state_reg <= state_next;
-            core_init_reg <= 1'b0;
-            core_next_reg <= 1'b0;
+
+            // Default assignments
+            ks_valid <= 1'b0;
+            // Keep ks_data until core_data_valid (avoid clearing to zero)
             ctr_reg <= ctr_next;
 
-            // Only update ks_data and ks_valid sequentially ✅
-            ks_valid <= 1'b0;
-            ks_data <= 512'h0;
+            // Pulse core_next for exactly 1 cycle
+            if(core_next_pulse) begin
+                core_next_reg <= 1'b0;
+                core_next_pulse <= 1'b0;
+            end
 
             case(state_reg)
                 S_IDLE: begin
                     if (ks_req && core_ready) begin
-                        core_next_reg <= 1'b1;
+                        core_next_reg <= 1'b1;   // assert next
+                        core_next_pulse <= 1'b1; // will clear next in next cycle
                         state_next <= S_WAIT;
                     end else state_next <= S_IDLE;
                 end
+
                 S_WAIT: begin
-                    if (core_data_valid) begin
+                    if(core_data_valid) begin
                         ks_data <= core_data_out;
                         ks_valid <= 1'b1;
                         ctr_next <= ctr_reg + 1;
@@ -91,7 +101,11 @@ module chacha_keystream_unit (
                         ctr_next <= ctr_reg;
                     end
                 end
-                S_OUT: state_next <= S_IDLE;
+
+                S_OUT: begin
+                    state_next <= S_IDLE;
+                end
+
                 default: state_next <= S_IDLE;
             endcase
         end
