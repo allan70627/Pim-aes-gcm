@@ -4,7 +4,7 @@
 module chacha_poly1305_adapter (
     input  wire         clk,
     input  wire         rst_n,
-    input  wire         start,       // start flow (from cfg write)
+    input  wire         start,       // start flow
     input  wire         algo_sel,
     input  wire [255:0] key,
     input  wire [95:0]  nonce,
@@ -39,41 +39,33 @@ module chacha_poly1305_adapter (
     output reg          lens_done
 );
 
-    // States (A1 flow)
-    localparam IDLE   = 4'd0;
-    localparam AAD    = 4'd1;
-    localparam MUL_WAIT = 4'd2;  
-    localparam MUL    = 4'd3;    
-    localparam REDUCE_WAIT = 4'd4; 
-    localparam REDUCE = 4'd5;
-    localparam PAYLD  = 4'd6;
-    localparam LEN    = 4'd7;
-    localparam FINAL  = 4'd8;
-    localparam DONE   = 4'd9;
+    // States
+    localparam IDLE = 4'd0, AAD = 4'd1, MUL_WAIT = 4'd2, MUL = 4'd3;
+    localparam REDUCE_WAIT = 4'd4, REDUCE = 4'd5, PAYLD = 4'd6;
+    localparam LEN = 4'd7, FINAL = 4'd8, DONE = 4'd9;
 
-    localparam ST_AAD   = 3'd0;
-    localparam ST_PAYLD = 3'd1;
-    localparam ST_LEN   = 3'd2;
+    localparam ST_AAD = 3'd0, ST_PAYLD = 3'd1, ST_LEN = 3'd2;
 
     reg [3:0] state, next_state;
     reg [2:0] prev_stage;
 
-    reg [257:0] acc;
-    reg [257:0] acc_next;
+    reg [257:0] acc, acc_next;
     reg         acc_next_valid;
 
     reg [129:0] block_reg;
     reg         block_reg_valid;
 
     reg [127:0] r_key, s_key;
-    reg start_mul_r;
-    reg start_reduce_r;
+    reg start_mul_r, start_reduce_r;
 
     wire [257:0] mul_out;
-    wire         mul_done;
+    wire mul_done;
     wire [129:0] reduce_out;
-    wire         reduce_done;
+    wire reduce_done;
 
+    // ---------------------------
+    // Multiplier & Reducer units
+    // ---------------------------
     mult_130x128_limb mul_unit(
         .clk(clk), .reset_n(rst_n),
         .start(start_mul_r),
@@ -97,77 +89,58 @@ module chacha_poly1305_adapter (
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= IDLE;
-            acc <= 258'b0;
-            acc_next <= 258'b0;
-            acc_next_valid <= 1'b0;
-            block_reg <= 130'b0;
-            block_reg_valid <= 1'b0;
-            r_key <= 128'b0;
-            s_key <= 128'b0;
-            start_mul_r <= 1'b0;
-            start_reduce_r <= 1'b0;
-            tag_pre_xor <= 128'b0;
-            tag_pre_xor_valid <= 1'b0;
-            tagmask <= 128'b0;
-            tagmask_valid <= 1'b0;
-            aad_ready <= 1'b0;
-            pld_ready <= 1'b0;
-            len_ready <= 1'b0;
-            aad_done <= 1'b0;
-            pld_done <= 1'b0;
-            lens_done <= 1'b0;
+            acc <= 0; acc_next <= 0; acc_next_valid <= 0;
+            block_reg <= 0; block_reg_valid <= 0;
+            r_key <= 0; s_key <= 0;
+            start_mul_r <= 0; start_reduce_r <= 0;
+            tag_pre_xor <= 0; tag_pre_xor_valid <= 0;
+            tagmask <= 0; tagmask_valid <= 0;
+            aad_ready <= 0; pld_ready <= 0; len_ready <= 0;
+            aad_done <= 0; pld_done <= 0; lens_done <= 0;
             prev_stage <= ST_AAD;
         end else begin
             // Clear single-cycle pulses
-            start_mul_r <= 1'b0;
-            start_reduce_r <= 1'b0;
-            tag_pre_xor_valid <= 1'b0;
-            tagmask_valid <= 1'b0;
-            aad_done <= 1'b0;
-            pld_done <= 1'b0;
-            lens_done <= 1'b0;
+            start_mul_r <= 0; start_reduce_r <= 0;
+            tag_pre_xor_valid <= 0; tagmask_valid <= 0;
+            aad_done <= 0; pld_done <= 0; lens_done <= 0;
 
-            // Update state
             state <= next_state;
 
-            // IDLE + start: latch keys and clear accumulator
+            // ---------------- IDLE -> latch keys ----------------
             if (state == IDLE && start && algo_sel) begin
                 r_key <= key[127:0];
                 s_key <= key[255:128];
-                acc <= 258'b0;
-                acc_next <= 258'b0;
-                acc_next_valid <= 1'b0;
-                block_reg_valid <= 1'b0;
+                acc <= 0; acc_next <= 0; acc_next_valid <= 0;
+                block_reg_valid <= 0;
             end
 
-            // ---- AAD block ----
+            // ---------------- AAD block ----------------
             if (state == AAD) begin
-                aad_ready <= 1'b1;
+                aad_ready <= 1;
                 if (aad_valid && !block_reg_valid) begin
                     block_reg <= {1'b1, aad_data};
-                    block_reg_valid <= 1'b1;
-                    // FIX: use input data directly, not old block_reg
+                    block_reg_valid <= 1;
                     acc_next <= acc + {128'b0, 1'b1, aad_data};
                     acc_next_valid <= 1'b1;
                     prev_stage <= ST_AAD;
                 end
-            end else aad_ready <= 1'b0;
+            end else aad_ready <= 0;
 
-            // ---- PAYLOAD block ----
+            // ---------------- PAYLOAD block ----------------
             if (state == PAYLD) begin
-                pld_ready <= 1'b1;
+                pld_ready <= 1;
+                if (!block_reg_valid && pld_valid) prev_stage <= ST_PAYLD;
                 if (pld_valid && !block_reg_valid) begin
                     block_reg <= {1'b1, pld_data};
                     block_reg_valid <= 1'b1;
                     acc_next <= acc + {128'b0, 1'b1, pld_data};
                     acc_next_valid <= 1'b1;
-                    prev_stage <= ST_PAYLD;
                 end
-            end else pld_ready <= 1'b0;
+            end else pld_ready <= 0;
 
-            // ---- LEN block ----
+            // ---------------- LEN block ----------------
             if (state == LEN) begin
-                len_ready <= 1'b1;
+                len_ready <= 1;
                 if (len_valid && !block_reg_valid) begin
                     block_reg <= {1'b1, len_block};
                     block_reg_valid <= 1'b1;
@@ -175,42 +148,38 @@ module chacha_poly1305_adapter (
                     acc_next_valid <= 1'b1;
                     prev_stage <= ST_LEN;
                 end
-            end else len_ready <= 1'b0;
+            end else len_ready <= 0;
 
-            // ---- MUL_WAIT ----
-            if (state == MUL_WAIT) begin
-                if (acc_next_valid) begin
-                    acc <= acc_next;
-                    acc_next_valid <= 1'b0;
-                    block_reg_valid <= 1'b0;
-                    start_mul_r <= 1'b1; // pulse multiplier
-                end
+            // ---------------- MUL_WAIT ----------------
+            if (state == MUL_WAIT && acc_next_valid) begin
+                acc <= acc_next;
+                acc_next_valid <= 0;
+                block_reg_valid <= 0;
+                start_mul_r <= 1;
             end
 
-            // REDUCE_WAIT: pulse reducer
-            if (state == REDUCE_WAIT) begin
-                start_reduce_r <= 1'b1;
-            end
+            // ---------------- REDUCE_WAIT ----------------
+            if (state == REDUCE_WAIT) start_reduce_r <= 1;
 
-            // REDUCE: latch reduced value and assert done pulse
+            // ---------------- REDUCE ----------------
             if (state == REDUCE && reduce_done) begin
                 acc[129:0] <= reduce_out;
                 case(prev_stage)
-                    ST_AAD:   aad_done <= 1'b1;
-                    ST_PAYLD: pld_done <= 1'b1;
-                    ST_LEN:   lens_done <= 1'b1;
+                    ST_AAD:   aad_done <= 1;
+                    ST_PAYLD: pld_done <= 1;
+                    ST_LEN:   lens_done <= 1;
                 endcase
             end
 
-            // FINAL: produce tag
+            // ---------------- FINAL ----------------
             if (state == FINAL) begin
                 tag_pre_xor <= acc[127:0] + s_key;
-                tag_pre_xor_valid <= 1'b1;
+                tag_pre_xor_valid <= 1;
                 tagmask <= {r_key, 32'h0};
-                tagmask_valid <= 1'b1;
+                tagmask_valid <= 1;
             end
 
-            // ---- DEBUG ----
+            // ---------------- DEBUG ----------------
             $display("[%0t] STATE=%0d, prev_stage=%0d, block_valid=%b, acc_next_valid=%b, start_mul=%b, start_reduce=%b, aad_done=%b, pld_done=%b, lens_done=%b",
                      $time, state, prev_stage, block_reg_valid, acc_next_valid, start_mul_r, start_reduce_r, aad_done, pld_done, lens_done);
         end
@@ -254,4 +223,3 @@ module chacha_poly1305_adapter (
 
 endmodule
 
-`default_nettype wire
