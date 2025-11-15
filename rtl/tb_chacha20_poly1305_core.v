@@ -33,16 +33,44 @@ module tb_chacha20_poly1305_core;
     wire pld_done;
     wire lens_done;
 
-    // Cycle counter
     integer cycle_counter;
+    integer i;
 
-    // Index for payload encryption
-    integer payload_idx;
+    reg [127:0] aad_blocks[0:4];
+    reg [127:0] payload_blocks[0:4];
 
-    // Encrypted data temporary
-    reg [127:0] enc_data;
+    reg [127:0] ciphertext;
+    reg [127:0] ks_segment;
 
-    // DUT instantiation
+    // Clock
+    initial clk = 0;
+    always #5 clk = ~clk;
+
+    // VCD
+    initial begin
+        $dumpfile("chacha20_poly1305_tb.vcd");
+        $dumpvars(0, tb_chacha20_poly1305_core);
+    end
+
+    initial cycle_counter = 0;
+    always @(posedge clk) cycle_counter = cycle_counter + 1;
+
+    // Fixed test vectors
+    initial begin
+        aad_blocks[0] = 128'h00112233445566778899AABBCCDDEEFF;
+        aad_blocks[1] = 128'h102132435465768798A9BACBDCEDFE0F;
+        aad_blocks[2] = 128'h2031425364758697A8B9CADBEBFC0D1E;
+        aad_blocks[3] = 128'h30415263748596A7B8C9DADBECF0E1F2;
+        aad_blocks[4] = 128'h405162738495A6B7C8DADBECEF1F2031;
+
+        payload_blocks[0] = 128'hAAAABBBBCCCCDDDDEEEEFFFF00001111;
+        payload_blocks[1] = 128'h11112222333344445555666677778888;
+        payload_blocks[2] = 128'h9999AAAABBBBCCCCDDDDEEEEFFFF0000;
+        payload_blocks[3] = 128'h00001111222233334444555566667777;
+        payload_blocks[4] = 128'h1234567890ABCDEF1234567890ABCDEF;
+    end
+
+    // DUT
     chacha20_poly1305_core dut (
         .clk(clk),
         .rst_n(rst_n),
@@ -74,24 +102,7 @@ module tb_chacha20_poly1305_core;
         .algo_sel(algo_sel)
     );
 
-    // Clock generation
-    initial clk = 0;
-    always #5 clk = ~clk;
-
-    // VCD dump
     initial begin
-        $dumpfile("chacha20_poly1305_tb.vcd");
-        $dumpvars(0, tb_chacha20_poly1305_core);
-    end
-
-    // Cycle counter
-    initial cycle_counter = 0;
-    always @(posedge clk) cycle_counter = cycle_counter + 1;
-
-    integer i, j;
-
-    initial begin
-        // Reset and init
         rst_n = 0; cfg_we = 0; ks_req = 0; algo_sel = 1;
         key = 256'h0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef;
         nonce = 96'habcdef1234567890abcdef12;
@@ -100,78 +111,71 @@ module tb_chacha20_poly1305_core;
         pld_valid = 0; pld_data = 0; pld_keep = 0;
         len_valid = 0; len_block = 0;
 
-        #20 rst_n = 1;
+        #20 rst_n = 1;  // Release reset
 
-        // Start Poly1305 (cfg_we pulse)
+        // Configure DUT
         @(posedge clk); cfg_we = 1;
         @(posedge clk); cfg_we = 0;
 
         // Request one keystream block
         @(posedge clk); ks_req = 1;
         @(posedge clk); ks_req = 0;
-
-        // Wait for keystream valid
         wait(ks_valid);
-        $display("[Cycle %0d] Keystream generated: %h", cycle_counter, ks_data);
+        $display("[Cycle %0d] Keystream block: %h", cycle_counter, ks_data);
 
-        // --- Feed 5 AAD blocks ---
+        // Feed AAD blocks
         for (i = 0; i < 5; i = i + 1) begin
             wait(aad_ready);
-            @(posedge clk);
             aad_valid <= 1;
-            aad_data  <= $random;
-            aad_keep  <= 16'hFFFF;
-            $display("[Cycle %0d] AAD input %0d: %h", cycle_counter, i, aad_data);
-
+            aad_data <= aad_blocks[i];
+            aad_keep <= 16'hFFFF;
             @(posedge clk);
             aad_valid <= 0;
-
             wait(aad_done);
-            $display("[Cycle %0d] AAD block %0d processed", cycle_counter, i);
+            $display("[Cycle %0d] AAD block %0d processed | data: %h", cycle_counter, i, aad_blocks[i]);
         end
 
-        // --- Feed 5 Payload blocks ---
-        payload_idx = 0;
-        for (i = 0; i < 5; i = i + 1) begin
+        // Feed Payload blocks and compute ciphertext using 128-bit keystream segments
+        for (i = 0; i < 4; i = i + 1) begin
             wait(pld_ready);
-            @(posedge clk);
             pld_valid <= 1;
-            pld_data  <= $random;
-            pld_keep  <= 16'hFFFF;
-            $display("[Cycle %0d] Payload input %0d: %h", cycle_counter, i, pld_data);
-
-            // Encrypt the payload by XOR with keystream (take 128-bit slice of 512-bit keystream)
-            enc_data = pld_data ^ ks_data[127:0];  // Using lower 128 bits for example
-            $display("[Cycle %0d] Encrypted payload %0d: %h", cycle_counter, i, enc_data);
-
+            pld_data <= payload_blocks[i];
+            pld_keep <= 16'hFFFF;
             @(posedge clk);
             pld_valid <= 0;
-
             wait(pld_done);
-            $display("[Cycle %0d] Payload block %0d processed", cycle_counter, i);
+
+            // Take 128-bit slice of keystream
+            ks_segment = ks_data[127 + i*128 -: 128];
+            ciphertext = payload_blocks[i] ^ ks_segment;
+            $display("[Cycle %0d] Payload block %0d | Plaintext: %h | Ciphertext: %h | Keystream used: %h",
+                      cycle_counter, i, payload_blocks[i], ciphertext, ks_segment);
         end
 
-        // --- Feed 1 Length block ---
-        wait(len_ready);
-        @(posedge clk);
-        len_valid <= 1;
-        len_block <= 128'h00000000000000000000000000000100; // example size 256 bytes
-        $display("[Cycle %0d] LEN block: %h", cycle_counter, len_block);
+        // Fifth block uses first 128-bit of new keystream (simulate next block)
+        @(posedge clk); ks_req = 1;
+        @(posedge clk); ks_req = 0;
+        wait(ks_valid);
+        ks_segment = ks_data[127:0];
+        ciphertext = payload_blocks[4] ^ ks_segment;
+        $display("[Cycle %0d] Payload block 4 | Plaintext: %h | Ciphertext: %h | Keystream used: %h",
+                  cycle_counter, payload_blocks[4], ciphertext, ks_segment);
 
+        // Feed length block
+        wait(len_ready);
+        len_valid <= 1;
+        len_block <= 128'h00000000000000000000000000000100;
         @(posedge clk);
         len_valid <= 0;
-
         wait(lens_done);
-        $display("[Cycle %0d] LEN block processed", cycle_counter);
+        $display("[Cycle %0d] LEN block processed | data: %h", cycle_counter, len_block);
 
         // Wait for tag outputs
         wait(tag_pre_xor_valid && tagmask_valid);
-        $display("[Cycle %0d] Final Tag Pre-XOR: %h", cycle_counter, tag_pre_xor);
-        $display("[Cycle %0d] Final Tagmask: %h", cycle_counter, tagmask);
+        $display("Final Tag Pre-XOR: %h", tag_pre_xor);
+        $display("Final Tagmask: %h", tagmask);
 
-        // Display total cycles
-        $display("Total cycles for 5 AAD + 5 Payload + 1 LEN: %0d", cycle_counter);
-
+        $display("Simulation finished. Total cycles: %0d", cycle_counter);
         $finish;
     end
 
