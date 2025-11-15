@@ -8,7 +8,7 @@ module chacha_poly1305_adapter (
     input  wire         algo_sel,
     input  wire [255:0] key,
     input  wire [95:0]  nonce,
-    input  wire [31:0]  ctr_init,
+    input  wire [31:0] ctr_init,
 
     input  wire         aad_valid,
     input  wire [127:0] aad_data,
@@ -54,6 +54,7 @@ module chacha_poly1305_adapter (
     reg [257:0] acc;
     reg [127:0] r_key, s_key;
 
+    // start pulses (registered)
     reg start_mul, start_reduce;
 
     wire [257:0] mul_out;
@@ -83,10 +84,10 @@ module chacha_poly1305_adapter (
     );
 
     // -----------------------------
-    // Sequential FSM registers
+    // Sequential FSM / registered actions
     // -----------------------------
     always @(posedge clk or negedge rst_n) begin
-        if(!rst_n) begin
+        if (!rst_n) begin
             state <= IDLE;
             acc <= 0;
             r_key <= 0;
@@ -105,35 +106,82 @@ module chacha_poly1305_adapter (
             lens_done <= 0;
             prev_stage <= ST_AAD;
         end else begin
-            state <= next_state;
-
-            // reset pulse signals
+            // default: clear 1-cycle pulses / valid/done outputs
             start_mul <= 0;
             start_reduce <= 0;
+            tag_pre_xor_valid <= 0;
+            tagmask_valid <= 0;
+            aad_done <= 0;
+            pld_done <= 0;
+            lens_done <= 0;
 
-            // Capture keys and accumulator updates in sequential always
-            if(state == IDLE && start && algo_sel) begin
+            // update state
+            state <= next_state;
+
+            // On IDLE + start: capture keys, clear accumulator, set initial prev_stage
+            if (state == IDLE && start && algo_sel) begin
                 r_key <= key[127:0];
                 s_key <= key[255:128];
                 acc <= 0;
+                prev_stage <= ST_AAD;
             end
 
-            // Update accumulator after multiplier or input
-            if(state == AAD && aad_valid) begin
-                acc <= acc + {128'b0, 2'b0, aad_data};
-            end else if(state == PAYLD && pld_valid) begin
-                acc <= acc + {128'b0, 2'b0, pld_data};
-            end else if(state == LEN && len_valid) begin
-                acc <= acc + {128'b0, 2'b0, len_block};
+            // When in AAD/PAYLD/LEN: sample valid and initiate multiplier with 1-cycle start pulse
+            if (state == AAD) begin
+                aad_ready <= 1;
+                if (aad_valid) begin
+                    // register accumulator update and pulse multiplier
+                    acc <= acc + {128'b0, 2'b0, aad_data}; // extend to 258 bits
+                    start_mul <= 1'b1;
+                    prev_stage <= ST_AAD;
+                end
+            end else aad_ready <= 0;
+
+            if (state == PAYLD) begin
+                pld_ready <= 1;
+                if (pld_valid) begin
+                    acc <= acc + {128'b0, 2'b0, pld_data};
+                    start_mul <= 1'b1;
+                    prev_stage <= ST_PAYLD;
+                end
+            end else pld_ready <= 0;
+
+            if (state == LEN) begin
+                len_ready <= 1;
+                if (len_valid) begin
+                    acc <= acc + {128'b0, 2'b0, len_block};
+                    start_mul <= 1'b1;
+                    prev_stage <= ST_LEN;
+                end
+            end else len_ready <= 0;
+
+            // When in MUL: wait for mul_done, then pulse reducer (registered)
+            if (state == MUL) begin
+                if (mul_done) begin
+                    start_reduce <= 1'b1;
+                end
             end
 
-            // Update accumulator after reduction
-            if(state == REDUCE && reduce_done) begin
-                acc[129:0] <= reduce_out;
+            // When reducer completes, latch reduced value and assert done pulse for that substage
+            if (state == REDUCE) begin
+                if (reduce_done) begin
+                    acc[129:0] <= reduce_out; // take reduced lower 130 bits
+                    case (prev_stage)
+                        ST_AAD: begin
+                            aad_done <= 1'b1;
+                        end
+                        ST_PAYLD: begin
+                            pld_done <= 1'b1;
+                        end
+                        ST_LEN: begin
+                            lens_done <= 1'b1;
+                        end
+                    endcase
+                end
             end
 
-            // Generate final outputs
-            if(state == FINAL) begin
+            // FINAL state outputs (registered)
+            if (state == FINAL) begin
                 tag_pre_xor <= acc[127:0] + s_key;
                 tag_pre_xor_valid <= 1'b1;
                 tagmask <= {r_key, 32'h0};
@@ -143,75 +191,58 @@ module chacha_poly1305_adapter (
     end
 
     // -----------------------------
-    // Combinational FSM next-state
+    // Combinational next-state logic (no registered pulses here)
     // -----------------------------
     always @* begin
+        // default next state is hold
         next_state = state;
 
-        // Default ready/done
-        aad_ready = 0; pld_ready = 0; len_ready = 0;
-        aad_done = 0; pld_done = 0; lens_done = 0;
-        start_mul = 0; start_reduce = 0;
-        tag_pre_xor_valid = 0; tagmask_valid = 0;
-
-        case(state)
+        // default combinational ready outputs (these are also set in sequential block to be registered)
+        // but keep combinational mirrors so external logic can see immediate readiness if needed
+        // (the sequential block drives the actual registered aad_ready/pld_ready/len_ready)
+        // We do not drive start_mul/start_reduce here (they are generated in sequential block).
+        case (state)
             IDLE: begin
-                if(start && algo_sel) begin
+                if (start && algo_sel) begin
                     next_state = AAD;
-                    prev_stage = ST_AAD;
-                    aad_ready = 1;
                 end
             end
 
             AAD: begin
-                aad_ready = 1;
-                if(aad_valid) begin
-                    start_mul = 1'b1;
+                // when verifier (sequential) sees aad_valid it will pulse start_mul and next_state moves
+                if (aad_valid) begin
                     next_state = MUL;
-                    prev_stage = ST_AAD;
                 end
             end
 
             PAYLD: begin
-                pld_ready = 1;
-                if(pld_valid) begin
-                    start_mul = 1'b1;
+                if (pld_valid) begin
                     next_state = MUL;
-                    prev_stage = ST_PAYLD;
                 end
             end
 
             LEN: begin
-                len_ready = 1;
-                if(len_valid) begin
-                    start_mul = 1'b1;
+                if (len_valid) begin
                     next_state = MUL;
-                    prev_stage = ST_LEN;
                 end
             end
 
             MUL: begin
-                if(mul_done) begin
-                    start_reduce = 1'b1;
+                // wait here until multiplier asserts done (mul_done)
+                if (mul_done) begin
                     next_state = REDUCE;
                 end
             end
 
             REDUCE: begin
-                if(reduce_done) begin
-                    case(prev_stage)
-                        ST_AAD: begin
-                            aad_done = 1'b1;
-                            next_state = PAYLD;
-                        end
-                        ST_PAYLD: begin
-                            pld_done = 1'b1;
-                            next_state = LEN;
-                        end
-                        ST_LEN: begin
-                            lens_done = 1'b1;
-                            next_state = FINAL;
-                        end
+                // wait here until reducer asserts done
+                if (reduce_done) begin
+                    // next state depends on prev_stage value (captured in sequential block)
+                    case (prev_stage)
+                        ST_AAD:  next_state = PAYLD;
+                        ST_PAYLD: next_state = LEN;
+                        ST_LEN:  next_state = FINAL;
+                        default: next_state = IDLE;
                     endcase
                 end
             end
@@ -222,8 +253,12 @@ module chacha_poly1305_adapter (
 
             DONE: begin
                 // hold outputs
+                next_state = DONE;
             end
+
+            default: next_state = IDLE;
         endcase
     end
 
 endmodule
+`default_nettype wire
