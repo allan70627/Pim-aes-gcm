@@ -150,12 +150,6 @@ module aes_gcm_datapath (
     wire         ks_valid_aes;
     reg  [127:0] ks_data_aes_reg;
     wire [127:0] ks_data_aes = ks_data_aes_reg;
-
-    // ChaCha-specific keystream (stubbed for now)
-    wire         ks_valid_chacha;
-    wire [127:0] ks_data_chacha;
-
-
     // CTR XOR connection
     // wire         ks_req;
     // wire         ks_valid;
@@ -541,19 +535,6 @@ module aes_gcm_datapath (
         .result_valid (aes_result_valid)
     );
 
-    // ChaCha keystream unit (currently stubbed; algo_is_chacha = 0 so unused)
-    chacha_keystream_unit u_chacha_ks (
-        .clk             (clk),
-        .rst_n           (rst_n),
-        .chacha_key      (key_active_reg),   // reuse key path in ChaCha mode
-        .chacha_nonce    (iv_in),            // reuse IV as nonce in ChaCha mode
-        .chacha_ctr_init (32'd1),           // typical starting counter
-        .cfg_we          (chacha_cfg_we),            // TODO: pulse on key/iv write in ChaCha mode
-        .ks_req          (algo_is_chacha ? ks_req : 1'b0),
-        .ks_valid        (ks_valid_chacha),
-        .ks_data         (ks_data_chacha)
-    );
-
     // ------------------------------------------------------------------
     // AES task scheduler: priority CTR > TAGMASK > H; INIT asap on key change
     // ------------------------------------------------------------------
@@ -661,7 +642,6 @@ module aes_gcm_datapath (
 endmodule
 
 `default_nettype wire
-
 
 
 
