@@ -1,9 +1,6 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-// ChaCha20-Poly1305 adapter (A1 flow: single AAD block -> N payload blocks -> single LEN block)
-// Proper registered handshake and pipelining: accumulator update is applied, then multiplier is started
-// on the following cycle so the multiplier always sees the updated accumulator.
 module chacha_poly1305_adapter (
     input  wire         clk,
     input  wire         rst_n,
@@ -13,19 +10,19 @@ module chacha_poly1305_adapter (
     input  wire [95:0]  nonce,
     input  wire [31:0]  ctr_init,
 
-    // AAD path (one or more 128-bit blocks allowed; A1 testbench sends 1)
+    // AAD path
     input  wire         aad_valid,
     input  wire [127:0] aad_data,
     input  wire [15:0]  aad_keep,
     output reg          aad_ready,
 
-    // Payload path (multiple 128-bit blocks)
+    // Payload path
     input  wire         pld_valid,
     input  wire [127:0] pld_data,
     input  wire [15:0]  pld_keep,
     output reg          pld_ready,
 
-    // Length block (single 128-bit)
+    // Length block
     input  wire         len_valid,
     input  wire [127:0] len_block,
     output reg          len_ready,
@@ -45,9 +42,9 @@ module chacha_poly1305_adapter (
     // States (A1 flow)
     localparam IDLE   = 4'd0;
     localparam AAD    = 4'd1;
-    localparam MUL_WAIT = 4'd2;  // after accepting block, wait one cycle to start mult
-    localparam MUL    = 4'd3;    // multiplier running
-    localparam REDUCE_WAIT = 4'd4; // after mul_done, start reducer next cycle
+    localparam MUL_WAIT = 4'd2;  
+    localparam MUL    = 4'd3;    
+    localparam REDUCE_WAIT = 4'd4; 
     localparam REDUCE = 4'd5;
     localparam PAYLD  = 4'd6;
     localparam LEN    = 4'd7;
@@ -61,29 +58,22 @@ module chacha_poly1305_adapter (
     reg [3:0] state, next_state;
     reg [2:0] prev_stage;
 
-    // accumulator: 130 bits used in lower bits, we store full 258 to allow adds
     reg [257:0] acc;
-    reg [257:0] acc_next;        // temp after adding block
+    reg [257:0] acc_next;
     reg         acc_next_valid;
 
-    // captured block (129 bits: 1||data)
     reg [129:0] block_reg;
     reg         block_reg_valid;
 
-    // keys
     reg [127:0] r_key, s_key;
-
-    // registered pulses to mult/reduce
-    reg start_mul_r;   // pulse asserted for one cycle to multiplier
+    reg start_mul_r;
     reg start_reduce_r;
 
-    // wires from submodules
     wire [257:0] mul_out;
     wire         mul_done;
     wire [129:0] reduce_out;
     wire         reduce_done;
 
-    // instantiate multiplier & reducer (done pulses 1 cycle)
     mult_130x128_limb mul_unit(
         .clk(clk), .reset_n(rst_n),
         .start(start_mul_r),
@@ -103,7 +93,7 @@ module chacha_poly1305_adapter (
         .done(reduce_done)
     );
 
-    // Sequential: registers, pulses, accumulator updates
+    // ================= Sequential logic =================
     always @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             state <= IDLE;
@@ -128,7 +118,7 @@ module chacha_poly1305_adapter (
             lens_done <= 1'b0;
             prev_stage <= ST_AAD;
         end else begin
-            // clear single-cycle pulses / outputs by default
+            // Clear single-cycle pulses
             start_mul_r <= 1'b0;
             start_reduce_r <= 1'b0;
             tag_pre_xor_valid <= 1'b0;
@@ -137,10 +127,10 @@ module chacha_poly1305_adapter (
             pld_done <= 1'b0;
             lens_done <= 1'b0;
 
-            // update state
+            // Update state
             state <= next_state;
 
-            // On IDLE + start: latch keys and clear accumulator
+            // IDLE + start: latch keys and clear accumulator
             if (state == IDLE && start && algo_sel) begin
                 r_key <= key[127:0];
                 s_key <= key[255:128];
@@ -150,152 +140,113 @@ module chacha_poly1305_adapter (
                 block_reg_valid <= 1'b0;
             end
 
-            // Accept block (AAD)
+            // ---- AAD block ----
             if (state == AAD) begin
                 aad_ready <= 1'b1;
                 if (aad_valid && !block_reg_valid) begin
-                    // capture block encoding: append 1 bit per Poly1305 spec
-                    block_reg <= {1'b1, aad_data}; // 129 bits -> stored in 130 bits
+                    block_reg <= {1'b1, aad_data};
                     block_reg_valid <= 1'b1;
-                    // create acc_next (acc + block) — do not overwrite acc yet
-                    acc_next <= acc + {128'b0, block_reg[129:0]}; // careful: block_reg will be used next cycle
+                    // FIX: use input data directly, not old block_reg
+                    acc_next <= acc + {128'b0, 1'b1, aad_data};
                     acc_next_valid <= 1'b1;
                     prev_stage <= ST_AAD;
                 end
-            end else begin
-                aad_ready <= 1'b0;
-            end
+            end else aad_ready <= 1'b0;
 
-            // Accept block (PAYLOAD)
+            // ---- PAYLOAD block ----
             if (state == PAYLD) begin
                 pld_ready <= 1'b1;
                 if (pld_valid && !block_reg_valid) begin
                     block_reg <= {1'b1, pld_data};
                     block_reg_valid <= 1'b1;
-                    acc_next <= acc + {128'b0, block_reg[129:0]};
+                    acc_next <= acc + {128'b0, 1'b1, pld_data};
                     acc_next_valid <= 1'b1;
                     prev_stage <= ST_PAYLD;
                 end
-            end else begin
-                pld_ready <= 1'b0;
-            end
+            end else pld_ready <= 1'b0;
 
-            // Accept block (LEN)
+            // ---- LEN block ----
             if (state == LEN) begin
                 len_ready <= 1'b1;
                 if (len_valid && !block_reg_valid) begin
                     block_reg <= {1'b1, len_block};
                     block_reg_valid <= 1'b1;
-                    acc_next <= acc + {128'b0, block_reg[129:0]};
+                    acc_next <= acc + {128'b0, 1'b1, len_block};
                     acc_next_valid <= 1'b1;
                     prev_stage <= ST_LEN;
                 end
-            end else begin
-                len_ready <= 1'b0;
-            end
+            end else len_ready <= 1'b0;
 
-            // MUL_WAIT: when acc_next_valid was produced in previous cycle, update acc and start multiplier
+            // ---- MUL_WAIT ----
             if (state == MUL_WAIT) begin
                 if (acc_next_valid) begin
-                    acc <= acc_next;           // apply the add result
+                    acc <= acc_next;
                     acc_next_valid <= 1'b0;
-                    block_reg_valid <= 1'b0;  // block consumed
-                    // pulse multiplier start (registered single-cycle)
-                    start_mul_r <= 1'b1;
+                    block_reg_valid <= 1'b0;
+                    start_mul_r <= 1'b1; // pulse multiplier
                 end
             end
 
-            // MUL: wait for mul_done; nothing to do here except hold busy until done
-            if (state == MUL) begin
-                // nothing — mul_done will be observed combinationally in next_state logic,
-                // but we don't create pulses here.
-            end
-
-            // REDUCE_WAIT: when mul_done observed, start reducer next cycle
+            // REDUCE_WAIT: pulse reducer
             if (state == REDUCE_WAIT) begin
-                // pulse reducer start
                 start_reduce_r <= 1'b1;
             end
 
-            // REDUCE: when reduce_done, latch reduced result into acc and assert done-pulse for stage
-            if (state == REDUCE) begin
-                if (reduce_done) begin
-                    acc[129:0] <= reduce_out; // update lower 130 bits from reducer
-                    // assert done pulse for the sub-stage
-                    case (prev_stage)
-                        ST_AAD: begin aad_done <= 1'b1; end
-                        ST_PAYLD: begin pld_done <= 1'b1; end
-                        ST_LEN: begin lens_done <= 1'b1; end
-                    endcase
-                end
+            // REDUCE: latch reduced value and assert done pulse
+            if (state == REDUCE && reduce_done) begin
+                acc[129:0] <= reduce_out;
+                case(prev_stage)
+                    ST_AAD:   aad_done <= 1'b1;
+                    ST_PAYLD: pld_done <= 1'b1;
+                    ST_LEN:   lens_done <= 1'b1;
+                endcase
             end
 
-            // FINAL: produce tag (registered)
+            // FINAL: produce tag
             if (state == FINAL) begin
                 tag_pre_xor <= acc[127:0] + s_key;
                 tag_pre_xor_valid <= 1'b1;
                 tagmask <= {r_key, 32'h0};
                 tagmask_valid <= 1'b1;
             end
+
+            // ---- DEBUG ----
+            $display("[%0t] STATE=%0d, prev_stage=%0d, block_valid=%b, acc_next_valid=%b, start_mul=%b, start_reduce=%b, aad_done=%b, pld_done=%b, lens_done=%b",
+                     $time, state, prev_stage, block_reg_valid, acc_next_valid, start_mul_r, start_reduce_r, aad_done, pld_done, lens_done);
         end
     end
 
-    // Combinational next-state logic (observes mul_done/reduce_done)
+    // ================= Combinational next-state logic =================
     always @* begin
         next_state = state;
-
         case (state)
-            IDLE: begin
-                if (start && algo_sel) next_state = AAD;
-            end
+            IDLE: if (start && algo_sel) next_state = AAD;
 
-            AAD: begin
-                // wait until block is captured; then go to MUL_WAIT for pipeline
-                if (block_reg_valid) next_state = MUL_WAIT;
-            end
+            AAD: if (block_reg_valid) next_state = MUL_WAIT;
 
-            MUL_WAIT: begin
-                // when we asserted start_mul_r (in sequential block) the multiplier will begin
-                // transit to MUL to wait for mul_done
-                next_state = MUL;
-            end
+            MUL_WAIT: next_state = MUL;
 
-            MUL: begin
-                if (mul_done) next_state = REDUCE_WAIT;
-            end
+            MUL: if (mul_done) next_state = REDUCE_WAIT;
 
-            REDUCE_WAIT: begin
-                next_state = REDUCE;
-            end
+            REDUCE_WAIT: next_state = REDUCE;
 
-            REDUCE: begin
-                if (reduce_done) begin
-                    // after reduce, choose next stage based on prev_stage
-                    if (prev_stage == ST_AAD) next_state = PAYLD;
-                    else if (prev_stage == ST_PAYLD) next_state = PAYLD; // stay in PAYLD to accept more blocks
-                    else if (prev_stage == ST_LEN) next_state = FINAL;
-                    else next_state = IDLE;
-                end
+            REDUCE: if (reduce_done) begin
+                if (prev_stage == ST_AAD) next_state = PAYLD;
+                else if (prev_stage == ST_PAYLD) next_state = PAYLD; // accept more payload
+                else if (prev_stage == ST_LEN) next_state = FINAL;
+                else next_state = IDLE;
             end
 
             PAYLD: begin
-                // Accept multiple payload blocks: once block_reg_valid moves to MUL_WAIT flow will continue
-                // Transition to LEN if testbench asserts len_valid while not accepting payload
                 if (block_reg_valid) next_state = MUL_WAIT;
-                else if (len_valid) next_state = LEN; // allow early switch if TB sets len_valid
+                else if (len_valid) next_state = LEN;
             end
 
-            LEN: begin
-                if (block_reg_valid) next_state = MUL_WAIT;
-            end
+            LEN: if (block_reg_valid) next_state = MUL_WAIT;
 
-            FINAL: begin
-                next_state = DONE;
-            end
+            FINAL: next_state = DONE;
 
-            DONE: begin
-                next_state = DONE;
-            end
+            DONE: next_state = DONE;
 
             default: next_state = IDLE;
         endcase
