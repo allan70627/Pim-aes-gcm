@@ -81,37 +81,36 @@ module tb_chacha20_poly1305_core;
         wait(ks_valid);
         $display("[%0t] Got keystream block (ks_valid=%b):\nks_data = %h", $time, ks_valid, ks_data);
 
-        // ---------------------------
-        // Send 10 AAD blocks safely
-        // ---------------------------
+        // -------------------------------
+        // Send 10 AAD blocks properly
         for (i = 0; i < 10; i = i + 1) begin
             aad_data = $random;
             aad_keep = 16'hffff;
             aad_valid = 1;
+            // Wait until DUT is ready
             wait(aad_ready);
-            @(posedge clk);
+            @(posedge clk);  // latch the block
             aad_valid = 0;
+            // Wait for this block to be processed
             wait(aad_done);
             $display("[%0t] AAD[%0d] processed: %h", $time, i, aad_data);
         end
 
-        // ---------------------------
-        // Send 10 Payload blocks safely
-        // ---------------------------
+        // -------------------------------
+        // Send 10 Payload blocks properly
         for (i = 0; i < 10; i = i + 1) begin
             pld_data = $random;
             pld_keep = 16'hffff;
             pld_valid = 1;
             wait(pld_ready);
-            @(posedge clk);
+            @(posedge clk); // latch
             pld_valid = 0;
             wait(pld_done);
             $display("[%0t] PAYLOAD[%0d] processed: %h", $time, i, pld_data);
         end
 
-        // ---------------------------
-        // Send length block safely
-        // ---------------------------
+        // -------------------------------
+        // Send length block properly
         len_block = 128'h00000000000000000000000000000080;
         len_valid = 1;
         wait(len_ready);
@@ -131,3 +130,6 @@ module tb_chacha20_poly1305_core;
     end
 
 endmodule
+
+`default_nettype wire
+
