@@ -40,6 +40,7 @@ module tb_chacha20_poly1305_core;
 
     integer i;
     integer cycle_counter;
+    integer start_cycle;
 
     // Arrays for AAD and payload blocks (Verilog style)
     reg [127:0] aad_mem0, aad_mem1, aad_mem2, aad_mem3, aad_mem4;
@@ -80,8 +81,8 @@ module tb_chacha20_poly1305_core;
         .algo_sel(algo_sel)
     );
 
+    // Initialize memory
     initial begin
-        // Initialize memory
         aad_mem0 = 128'h00112233445566778899aabbccddeeff;
         aad_mem1 = 128'h0102030405060708090a0b0c0d0e0f10;
         aad_mem2 = 128'h1112131415161718191a1b1c1d1e1f20;
@@ -98,6 +99,12 @@ module tb_chacha20_poly1305_core;
     // Clock counter
     initial cycle_counter = 0;
     always @(posedge clk) cycle_counter = cycle_counter + 1;
+
+    // VCD dump for GTKWave
+    initial begin
+        $dumpfile("tb_chacha20_poly1305_core.vcd");
+        $dumpvars(0, tb_chacha20_poly1305_core);
+    end
 
     initial begin
         // Reset
@@ -119,14 +126,17 @@ module tb_chacha20_poly1305_core;
         @(posedge clk);
         cfg_we = 0;
 
+        $display("\n[INFO] Key = %h", key);
+
         // Request one keystream block
+        start_cycle = cycle_counter;
         ks_req = 1;
         @(posedge clk);
         ks_req = 0;
 
         // Wait for ks_valid
         wait (ks_valid);
-        $display("[Cycle %0d] Keystream block (512-bit):", cycle_counter);
+        $display("[Cycle %0d] Keystream block (512-bit) generated in %0d cycles:", cycle_counter, cycle_counter - start_cycle);
         $display("  KS[127:0]   = %h", ks_data[127:0]);
         $display("  KS[255:128] = %h", ks_data[255:128]);
         $display("  KS[383:256] = %h", ks_data[383:256]);
@@ -135,6 +145,7 @@ module tb_chacha20_poly1305_core;
         // --- Feed AAD blocks ---
         for(i=0; i<5; i=i+1) begin
             @(posedge clk);
+            start_cycle = cycle_counter;
             aad_valid = 1;
             case(i)
                 0: aad_data = aad_mem0;
@@ -144,17 +155,19 @@ module tb_chacha20_poly1305_core;
                 4: aad_data = aad_mem4;
             endcase
             aad_keep = 16'hFFFF;
+            $display("[Cycle %0d] Feeding AAD block %0d: %h", cycle_counter, i, aad_data);
             @(posedge clk);
             aad_valid = 0;
 
             wait (aad_done == 1);
             @(posedge clk);
-            $display("[Cycle %0d] AAD block %0d processed", cycle_counter, i);
+            $display("[Cycle %0d] AAD block %0d processed in %0d cycles", cycle_counter, i, cycle_counter - start_cycle);
         end
 
-        // --- Feed Payload blocks and XOR with keystream ---
+        // --- Feed Payload blocks ---
         for(i=0; i<5; i=i+1) begin
             @(posedge clk);
+            start_cycle = cycle_counter;
             pld_valid = 1;
             case(i)
                 0: pld_data = pld_mem0;
@@ -164,40 +177,44 @@ module tb_chacha20_poly1305_core;
                 4: pld_data = pld_mem4;
             endcase
             pld_keep = 16'hFFFF;
+            $display("[Cycle %0d] Feeding Payload block %0d: %h", cycle_counter, i, pld_data);
             @(posedge clk);
             pld_valid = 0;
 
             wait (pld_done == 1);
             @(posedge clk);
 
-            // XOR payload with keystream slice
+            // XOR payload with keystream slice (for demonstration)
             case(i)
                 0: pld_out = pld_data ^ ks_data[127:0];
                 1: pld_out = pld_data ^ ks_data[255:128];
                 2: pld_out = pld_data ^ ks_data[383:256];
                 3: pld_out = pld_data ^ ks_data[511:384];
-                4: pld_out = pld_data ^ 128'h0; // No keystream left, example
+                4: pld_out = pld_data ^ 128'h0;
             endcase
 
-            $display("[Cycle %0d] Payload block %0d encrypted = %h", cycle_counter, i, pld_out);
+            $display("[Cycle %0d] Payload block %0d encrypted = %h | Cycles = %0d", cycle_counter, i, pld_out, cycle_counter - start_cycle);
         end
 
         // --- Feed LEN block ---
         @(posedge clk);
+        start_cycle = cycle_counter;
         len_valid = 1;
         len_block = 128'h00000000000000000000000000000100;
+        $display("[Cycle %0d] Feeding LEN block: %h", cycle_counter, len_block);
         @(posedge clk);
         len_valid = 0;
 
         wait (lens_done == 1);
         @(posedge clk);
-        $display("[Cycle %0d] LEN block processed | data = %h", cycle_counter, len_block);
+        $display("[Cycle %0d] LEN block processed in %0d cycles | data = %h", cycle_counter, cycle_counter - start_cycle, len_block);
 
         // Wait for tag
         wait(tag_pre_xor_valid && tagmask_valid);
         $display("[Cycle %0d] Tag_pre_xor = %h", cycle_counter, tag_pre_xor);
         $display("[Cycle %0d] Tagmask      = %h", cycle_counter, tagmask);
 
+        $display("\nTotal simulation cycles: %0d", cycle_counter);
         $display("Testbench finished.");
         $stop;
     end
@@ -205,4 +222,3 @@ module tb_chacha20_poly1305_core;
 endmodule
 
 `default_nettype wire
-
