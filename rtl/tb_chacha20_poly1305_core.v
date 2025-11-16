@@ -7,7 +7,7 @@ module tb_chacha20_poly1305_core;
     reg clk;
     reg rst_n;
     initial clk = 0;
-    always #5 clk = ~clk;
+    always #1 clk = ~clk;
 
     // DUT signals
     reg [255:0] key;
