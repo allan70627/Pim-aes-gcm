@@ -1,7 +1,7 @@
 `timescale 1ns/1ps
 `default_nettype none
 
-module reduce_mod_poly1305_fast(
+module reduce_mod_poly1305(
     input  wire         clk,
     input  wire         reset_n,
     input  wire         start,
