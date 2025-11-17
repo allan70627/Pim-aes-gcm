@@ -2,7 +2,7 @@
 `default_nettype none
 
 // Optimized 130x128 multiplier: 10-cycle latency
-module mult_130x128_limb_fast(
+module mult_130x128_limb(
     input  wire         clk,
     input  wire         reset_n,
     input  wire         start,
